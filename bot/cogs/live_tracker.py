@@ -395,32 +395,40 @@ class LiveTracker(commands.Cog):
                     return entry
         return None
 
-    async def _goal_gif(self, team: str) -> str | None:
-        """Fetch a goal-celebration gif URL from Klipy; returns None when the key is
-        missing or on any API hiccup so the caller can fall back to the gif-bot ping."""
-        key = self._klipy_key()
-        if not key:
-            return None
-        # Vary the query too, not just the pick — more variety across goals.
-        q = random.choice((f"{team} gol", f"{team} goal celebration",
-                           "golazo celebracion", "goal celebration futbol"))
-        params = {"q": q, "page": 1, "per_page": self._GIF_POOL, "content_filter": "low"}
+    async def _klipy_search(self, key: str, query: str) -> list[str]:
+        """Klipy gif search → list of displayable URLs ([] on any hiccup)."""
+        params = {"q": query, "page": 1, "per_page": self._GIF_POOL, "content_filter": "low"}
         try:
             async with self.bot.session.get(
                 f"https://api.klipy.com/api/v1/{key}/gifs/search", params=params
             ) as resp:
                 if resp.status != 200:
                     log.warning("live_tracker: klipy search failed (%s)", resp.status)
-                    return None
+                    return []
                 data = await resp.json()
         except Exception as e:
             log.warning("live_tracker: klipy search error: %r", e)
-            return None
+            return []
         if not data.get("result"):
             log.warning("live_tracker: klipy returned unsuccessful result")
-            return None
+            return []
         items = (data.get("data") or {}).get("data") or []
-        urls = [u for u in (self._best_klipy_url(i) for i in items if isinstance(i, dict)) if u]
+        return [u for u in (self._best_klipy_url(i) for i in items if isinstance(i, dict)) if u]
+
+    async def _goal_gif(self, team: str) -> str | None:
+        """Fetch a goal-celebration gif from Klipy, themed on the SCORING TEAM —
+        every query carries the team name; a generic football-goal search is only
+        the fallback when the team-specific search comes up empty. Returns None
+        when the key is missing or on any API hiccup."""
+        key = self._klipy_key()
+        if not key:
+            return None
+        # Vary the phrasing per goal (not just the pick) — more variety across goals.
+        q = random.choice((f"{team} gol celebracion", f"{team} goal celebration",
+                           f"gol de {team}", f"{team} futbol gol"))
+        urls = await self._klipy_search(key, q)
+        if not urls:
+            urls = await self._klipy_search(key, "goal celebration futbol")
         if not urls:
             return None
         fresh = [u for u in urls if u not in self._recent_gifs] or urls
