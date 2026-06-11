@@ -11,7 +11,10 @@ up automatically because recompute/rescore run every tick over all finished matc
 """
 import json
 import logging
+import os
+import random
 import time
+import urllib.parse
 
 import discord
 from discord import app_commands
@@ -251,8 +254,36 @@ class LiveTracker(commands.Cog):
                     new_goals.append({"home": m["home"], "away": m["away"], "ev": ev, "etype": etype})
         return new_goals
 
-    # The gif-bot user pinged after every confirmed goal announcement.
+    # The gif-bot user pinged after every confirmed goal announcement. NOTE: other
+    # bots ignore messages authored by bots, so this ping only works if that bot is
+    # configured to react to bot messages — the Tenor path below is the reliable one.
     GOAL_GIF_USER_ID = 1355258979789312100
+
+    async def _goal_gif(self, team: str) -> str | None:
+        """Fetch a goal-celebration gif URL from Tenor (random pick from top results).
+        Requires TENOR_API_KEY in the bot environment; returns None when unset or on
+        any API hiccup so the caller can fall back to pinging the gif bot."""
+        key = os.environ.get("TENOR_API_KEY")
+        if not key:
+            return None
+        q = urllib.parse.quote(f"{team} gol celebration futbol")
+        url = (f"https://tenor.googleapis.com/v2/search?q={q}&key={key}"
+               f"&limit=15&media_filter=gif&random=true&contentfilter=medium")
+        try:
+            async with self.bot.session.get(url) as resp:
+                if resp.status != 200:
+                    log.warning("live_tracker: tenor search failed (%s)", resp.status)
+                    return None
+                data = await resp.json()
+        except Exception as e:
+            log.warning("live_tracker: tenor search error: %r", e)
+            return None
+        results = data.get("results") or []
+        if not results:
+            return None
+        r = random.choice(results)
+        # itemurl (tenor.com/view/...) auto-embeds in Discord; raw gif URL as backup.
+        return r.get("itemurl") or ((r.get("media_formats") or {}).get("gif") or {}).get("url")
 
     async def _announce_goals(self, settings_rows, goals: list[dict]):
         """Confirmed-goal pings: for each goal event seen for the FIRST time this tick,
@@ -290,12 +321,18 @@ class LiveTracker(commands.Cog):
                         f"{ping}⚽ ¡GOOOL de **{scorer or home}** contra **{other}**!{detail}",
                         allowed_mentions=discord.AllowedMentions(roles=True),
                     )
-                    # Include the scoring team (and player/minute when known) so each
-                    # gif request is a distinct message, not a repeated identical line.
-                    await channel.send(
-                        f"<@{self.GOAL_GIF_USER_ID}> goal of {scorer or home}{detail} — find a goal gif",
-                        allowed_mentions=discord.AllowedMentions(users=True),
-                    )
+                    # Post the gif ourselves via Tenor when a key is configured (bots
+                    # ignore pings from other bots, so the gif-bot path rarely works).
+                    gif = await self._goal_gif(scorer or home)
+                    if gif:
+                        await channel.send(gif)
+                    else:
+                        # Include the scoring team (and player/minute when known) so each
+                        # gif request is a distinct message, not a repeated identical line.
+                        await channel.send(
+                            f"<@{self.GOAL_GIF_USER_ID}> goal of {scorer or home}{detail} — find a goal gif",
+                            allowed_mentions=discord.AllowedMentions(users=True),
+                        )
                 except discord.HTTPException as e:
                     log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
 

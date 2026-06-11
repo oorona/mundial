@@ -75,6 +75,7 @@ services:
       ENVIRONMENT: production
       BACKEND_BASE: http://${APP_NAME}-backend:8000  # unique host (avoids shared `backend` DNS clash)
       MAX_GUILDS: ${MAX_GUILDS:-0}  # server cap (0 = unlimited); guild_limit cog leaves new servers over this
+      TENOR_API_KEY: ${TENOR_API_KEY:-}  # goal gifs (live_tracker); empty → falls back to pinging the gif bot
     volumes:
       - ./bot:/app
       - platform_data:/data
