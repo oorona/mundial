@@ -268,6 +268,11 @@ _NOW_SQL = [
     "SELECT id FROM matches WHERE finished=false AND kickoff_at IS NOT NULL "
     "AND kickoff_at <= now() + interval '5 minutes' AND kickoff_at >= now() - interval '3 hours' "
     "ORDER BY kickoff_at LIMIT 1",
+    # else the LAST finished match — keep showing it (with its final score) until the
+    # next game actually enters its live window; never jump ahead to the upcoming
+    # fixture while its stream hasn't started.
+    "SELECT id FROM matches WHERE finished=true AND kickoff_at IS NOT NULL "
+    "ORDER BY kickoff_at DESC LIMIT 1",
     # else next upcoming with both teams known (the inauguration before the tournament)
     "SELECT id FROM matches WHERE finished=false AND kickoff_at IS NOT NULL "
     "AND home_team_id IS NOT NULL AND away_team_id IS NOT NULL ORDER BY kickoff_at LIMIT 1",
@@ -305,6 +310,16 @@ async def now(db: AsyncSession = Depends(get_db), redis=Depends(get_redis_option
             events = [json.loads(x) for x in raw]
         except Exception:
             events = []
+    # Keep the feed in sync with the header: only events for the match(es) on
+    # screen — the in-window games when live, else the displayed (last finished)
+    # match. Pre-tournament news is the one exception.
+    inwindow_ids = set((await db.execute(_sql(
+        "SELECT id FROM matches WHERE finished=false AND kickoff_at IS NOT NULL "
+        "AND kickoff_at <= now() + interval '5 minutes' AND kickoff_at >= now() - interval '3 hours'"
+    ))).scalars().all())
+    allowed = inwindow_ids or ({m.id} if m else set())
+    events = [e for e in events
+              if e.get("match_id") in allowed or (e.get("type") == "news" and not started)]
     return {
         "match": _match_brief(m, tmap, smap, base) if m else None,
         "events": events,

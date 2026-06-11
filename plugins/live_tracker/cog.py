@@ -133,6 +133,7 @@ class LiveTracker(commands.Cog):
         inwindow = await self._read_inwindow()
         if inwindow:
             # ── LIVE mode (every 2 min during a game window): AI score + events ──
+            await self._fresh_window_wipe()
             ai: dict[int, dict] = {}
             for m in inwindow:
                 r = await self._ai_for_match(provider, m) if provider else None
@@ -154,7 +155,27 @@ class LiveTracker(commands.Cog):
             # inauguration match → channel + app feed. Confirms the AI pipeline.
             # The inauguration is not a match, so it refreshes slowly (8h); a real
             # match in window switches to LIVE mode above (2-min cadence). ──
+            if self.redis:
+                try:
+                    await self.redis.delete("live:window_active")
+                except Exception:
+                    pass
             await self._maybe_news(provider)
+
+    async def _fresh_window_wipe(self):
+        """When a live window OPENS (no game was in window before this tick), clear
+        the previous game's feed — the stream now belongs to the new game. The
+        Redis marker (not memory) means a mid-game restart never wipes the feed."""
+        if not self.redis:
+            return
+        try:
+            fresh = await self.redis.set("live:window_active", "1", nx=True, ex=14400)
+            if fresh:
+                await self.redis.delete("live:events", "live:events:recent")
+            else:
+                await self.redis.expire("live:window_active", 14400)
+        except Exception:
+            pass
 
     @tick.before_loop
     async def _before(self):
@@ -490,10 +511,15 @@ class LiveTracker(commands.Cog):
         try:
             await self.redis.set("live:news:last_ts", now)
             # Inauguration is not a match: keep its card to a single fresh item rather
-            # than a growing pile of hourly posts. Clear the shared feed before posting
-            # the 8h update; LIVE mode (every 2 min) repopulates it once a game is in
-            # window, so real matches — including the opener — keep their rolling feed.
-            await self.redis.delete("live:events", "live:events:recent")
+            # than a growing pile of hourly posts — but ONLY before the tournament has
+            # started. Once games have been played, the feed belongs to the last match
+            # and must survive until the next game's window wipes it (_fresh_window_wipe).
+            async with self.db.worker_session() as s:
+                started = bool((await s.execute(
+                    text("SELECT count(*) FROM matches WHERE finished = true")
+                )).scalar())
+            if not started:
+                await self.redis.delete("live:events", "live:events:recent")
         except Exception:
             pass
         await self._push_event({"type": "news", "match_id": nm["id"], "home": nm["home"],
