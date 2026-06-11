@@ -1,0 +1,69 @@
+{
+  "name": "live_tracker",
+  "display_name": "Mundial — En vivo (IA)",
+  "version": "1.0.0",
+  "description": "Worker de IA que busca marcadores en internet, confirma resultados finales, recalcula clasificación/bracket y re-puntúa pronósticos. Transmite eventos a un canal y corrige resultados (admin).",
+  "permission_level": 4,
+  "worker": true,
+  "capabilities": ["sse"],
+  "components": {
+    "cog": true,
+    "api": true,
+    "models": false,
+    "migration": false,
+    "frontend": true,
+    "translations": true,
+    "prompts": true
+  },
+  "router": {
+    "prefix": "/guilds",
+    "tag": "live_tracker"
+  },
+  "pages": [
+    {
+      "id": "live_tracker",
+      "source": "page.tsx",
+      "path": "live-tracker",
+      "permission_level": 6,
+      "navigation": {
+        "enabled": true,
+        "icon": "Radio",
+        "color": "text-red-500",
+        "bg_color": "bg-red-500/10",
+        "border_color": "group-hover:border-red-500/50"
+      }
+    }
+  ],
+  "activity_pages": [
+    { "source": "activity.tsx", "path": "envivo" }
+  ],
+  "prompts": [
+    {
+      "context": "score_fetch",
+      "label": "Búsqueda de marcador",
+      "description": "Busca el marcador/estado actuales del partido con grounding.",
+      "files": [
+        { "name": "system_prompt", "label": "Sistema" },
+        { "name": "user_prompt", "label": "Usuario" }
+      ]
+    },
+    {
+      "context": "score_parse",
+      "label": "Conversión a JSON",
+      "description": "Convierte el texto encontrado en un JSON estricto de resultado.",
+      "files": [
+        { "name": "system_prompt", "label": "Sistema" },
+        { "name": "user_prompt", "label": "Usuario" }
+      ]
+    },
+    {
+      "context": "news_fetch",
+      "label": "Noticias del partido",
+      "description": "Resume noticias recientes del próximo partido/inauguración (en español).",
+      "files": [
+        { "name": "system_prompt", "label": "Sistema" },
+        { "name": "user_prompt", "label": "Usuario" }
+      ]
+    }
+  ]
+}

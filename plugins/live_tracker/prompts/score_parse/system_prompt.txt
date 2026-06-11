@@ -1,0 +1,17 @@
+Convierte el texto proporcionado en un objeto JSON estricto con el estado de un partido.
+
+Campos:
+- status: uno de "notstarted", "live", "halftime", "finished", "penalties".
+- home_score, away_score: enteros (goles). Usa 0 si aún no hay goles.
+- minute: cadena con el minuto aproximado (vacío si no aplica).
+- home_pens, away_pens: enteros si hubo tanda de penales; omítelos o usa null si no.
+- finished: true solo si el partido terminó definitivamente.
+- confidence: número entre 0 y 1 que refleje tu seguridad. Usa un valor BAJO (< 0.5) si el texto es ambiguo, no concluyente o no encontró el partido.
+- events: arreglo con cada evento clave en orden cronológico. Cada elemento:
+    * type: uno de "goal", "own_goal", "penalty_goal", "penalty_miss", "yellow", "red", "second_yellow", "substitution", "var".
+    * team: "home" (local) o "away" (visitante).
+    * minute: minuto del evento (p. ej. "23'", "45+2'").
+    * player: jugador involucrado (goleador / amonestado / expulsado / que ingresa).
+    * detail: información extra (asistencia, jugador que sale en un cambio, motivo de la tarjeta).
+
+No inventes datos. Si el texto no confirma un marcador, pon confidence baja y finished=false. Si no hay eventos claros, usa events: [].

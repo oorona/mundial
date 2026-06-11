@@ -1,0 +1,66 @@
+{
+  "name": "predictions",
+  "display_name": "Mundial — Pronósticos",
+  "version": "1.0.0",
+  "description": "Quiniela del Mundial: pronósticos por partido con bloqueo por fase/horario y puntuación estilo Kicktipp configurable. Tablas con RLS por servidor.",
+  "permission_level": 2,
+  "components": {
+    "cog": true,
+    "api": true,
+    "models": true,
+    "migration": true,
+    "frontend": true,
+    "translations": true,
+    "prompts": false
+  },
+  "router": {
+    "prefix": "/guilds",
+    "tag": "predictions",
+    "audit_exempt_paths": ["/{guild_id}/predictions/submit", "/{guild_id}/predictions/submit-batch", "/{guild_id}/predictions/web-submit", "/{guild_id}/predictions/web-submit-batch"]
+  },
+  "pages": [
+    {
+      "id": "predictions",
+      "source": "page.tsx",
+      "path": "predictions",
+      "permission_level": 2,
+      "navigation": {
+        "enabled": true,
+        "icon": "Target",
+        "color": "text-emerald-500",
+        "bg_color": "bg-emerald-500/10",
+        "border_color": "group-hover:border-emerald-500/50"
+      }
+    },
+    {
+      "id": "submissions",
+      "source": "submissions.tsx",
+      "path": "submissions",
+      "permission_level": 5,
+      "navigation": {
+        "enabled": true,
+        "icon": "Users",
+        "color": "text-amber-500",
+        "bg_color": "bg-amber-500/10",
+        "border_color": "group-hover:border-amber-500/50"
+      }
+    },
+    {
+      "id": "daily_scores",
+      "source": "daily.tsx",
+      "path": "daily-scores",
+      "permission_level": 5,
+      "navigation": {
+        "enabled": true,
+        "icon": "CalendarDays",
+        "color": "text-rose-500",
+        "bg_color": "bg-rose-500/10",
+        "border_color": "group-hover:border-rose-500/50"
+      }
+    }
+  ],
+  "activity_pages": [
+    { "source": "activity.tsx", "path": "predicciones" },
+    { "source": "rules.tsx", "path": "reglas" }
+  ]
+}

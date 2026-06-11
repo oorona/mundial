@@ -1,0 +1,22 @@
+// Translation snippet for ai_player — Spanish
+// Contains ONLY the namespace block. Installer merges this into es.ts before `};`
+aiPlayer: {
+  cardTitle: 'Analista IA',
+  cardDesc: 'Lanza el análisis y el pronóstico del jugador IA por partido (solo Desarrollador).',
+  title: 'Analista IA de partidos',
+  subtitle: 'Elige un día, analiza cada partido con el consenso de internet y guarda la decisión del jugador IA.',
+  day: 'Día',
+  noMatches: 'No hay partidos ese día.',
+  analyze: 'Analizar',
+  reanalyze: 'Reanalizar',
+  analyzing: 'Analizando internet… puede tardar un momento.',
+  decision: 'Decisión',
+  confidence: 'Confianza',
+  analysisTitle: 'Análisis',
+  publicTitle: 'Análisis de la IA',
+  publicHint: 'El razonamiento del jugador IA. Su marcador pronosticado permanece oculto hasta que se juegue el partido.',
+  notAnalyzed: 'Aún no analizado.',
+  errorMsg: 'El análisis falló. Inténtalo de nuevo.',
+  status: { none: 'Sin analizar', queued: 'En cola', running: 'Analizando…', done: 'Listo', error: 'Error' },
+  settings: { label: 'Jugador IA', desc: 'El jugador máquina que pronostica los partidos con el consenso de internet.', enabled: 'Mostrar al jugador IA en la clasificación', name: 'Nombre del jugador IA' },
+},

@@ -1,0 +1,94 @@
+{
+  "id": "knowledge_base_tools",
+  "name": "Knowledge Base Tools",
+  "description": "Functions for querying a bot's knowledge base, FAQs, and documentation. Use these when users ask questions that should be answered from stored content.",
+  "example_prompts": [
+    "What are the server rules?",
+    "How do I set up the logging feature?",
+    "Find answers about the verification process"
+  ],
+  "functions": [
+    {
+      "name": "search_faq",
+      "description": "Search the server's FAQ database for answers to common questions. Returns matching Q&A pairs ordered by relevance.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The user's question or search terms"
+          },
+          "category": {
+            "type": "string",
+            "enum": ["rules", "setup", "commands", "features", "billing", "support", "other"],
+            "description": "Optional category to filter results"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of results to return",
+            "minimum": 1,
+            "maximum": 10
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "get_server_rules",
+      "description": "Retrieve the complete list of server rules. Call this when a user asks about rules, is warned, or needs to be reminded of the rules.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["all", "behavior", "content", "channels", "bots"],
+            "description": "Category of rules to retrieve"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "lookup_command_docs",
+      "description": "Look up documentation for a specific bot command including syntax, parameters, and examples.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command_name": {
+            "type": "string",
+            "description": "The command name to look up (without prefix, e.g. 'warn', 'mute')"
+          }
+        },
+        "required": ["command_name"]
+      }
+    },
+    {
+      "name": "create_support_ticket",
+      "description": "Create a support ticket in a private channel for issues that require human moderator attention.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "Discord user ID of the person needing support"
+          },
+          "issue_summary": {
+            "type": "string",
+            "description": "Brief description of the issue"
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["low", "normal", "high", "urgent"],
+            "description": "Ticket priority level"
+          },
+          "category": {
+            "type": "string",
+            "enum": ["technical", "moderation", "account", "billing", "other"],
+            "description": "Type of support needed"
+          }
+        },
+        "required": ["user_id", "issue_summary", "priority"]
+      }
+    }
+  ]
+}

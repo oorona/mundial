@@ -1,0 +1,122 @@
+version: '3.8'
+
+services:
+  # Backend API (FastAPI)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bot-backend
+    secrets:
+      - discord_client_secret
+      - discord_bot_token
+      - api_secret_key
+    env_file:
+      - .env # Contains DATABASE_URL and REDIS_URL for external services
+    environment:
+      # Secrets loaded from files
+      DISCORD_BOT_TOKEN_FILE: /run/secrets/discord_bot_token
+      DISCORD_CLIENT_SECRET_FILE: /run/secrets/discord_client_secret
+      API_SECRET_KEY_FILE: /run/secrets/api_secret_key
+    networks:
+      - intranet # For frontend and bot communication
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/api/v1/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Discord Bot
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    container_name: bot-discord
+    secrets:
+      - discord_bot_token
+      - openai_api_key
+      - google_api_key
+      - anthropic_api_key
+      - xai_api_key
+    env_file:
+      - .env # Contains DATABASE_URL and REDIS_URL for external services
+    environment:
+      # Secrets loaded from files
+      DISCORD_BOT_TOKEN_FILE: /run/secrets/discord_bot_token
+      OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+      GOOGLE_API_KEY_FILE: /run/secrets/google_api_key
+      ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
+      XAI_API_KEY_FILE: /run/secrets/xai_api_key
+    networks:
+      - intranet # For backend API communication (if needed)
+    ports:
+      - "8080:8080" # Health check endpoint
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: bot-frontend
+    env_file:
+      - .env # Frontend config (non-sensitive)
+    networks:
+      - internet # Public facing
+      - intranet # For backend API calls
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:3000/api/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  internet:
+    external: true
+    name: internet
+  intranet:
+    external: true
+    name: intranet
+
+secrets:
+  # Discord secrets
+  discord_bot_token:
+    file: ./secrets/discord_bot_token.txt
+  discord_client_secret:
+    file: ./secrets/discord_client_secret.txt
+
+  # API secrets
+  api_secret_key:
+    file: ./secrets/api_secret_key.txt
+
+  # LLM API Keys
+  openai_api_key:
+    file: ./secrets/openai_api_key.txt
+  google_api_key:
+    file: ./secrets/google_api_key.txt
+  anthropic_api_key:
+    file: ./secrets/anthropic_api_key.txt
+  xai_api_key:
+    file: ./secrets/xai_api_key.txt

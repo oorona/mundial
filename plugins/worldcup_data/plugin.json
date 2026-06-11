@@ -1,0 +1,35 @@
+{
+  "name": "worldcup_data",
+  "display_name": "Mundial — Datos",
+  "version": "1.0.0",
+  "description": "Capa de datos del Mundial 2026: equipos, grupos, clasificacion, partidos, jugadores y bracket. Comando /mundial y pagina de exploracion. Lee las tablas creadas por el ingest.",
+  "permission_level": 2,
+  "components": {
+    "cog": true,
+    "api": true,
+    "models": true,
+    "migration": true,
+    "frontend": true,
+    "translations": true,
+    "prompts": false
+  },
+  "router": {
+    "prefix": "/worldcup",
+    "tag": "worldcup_data"
+  },
+  "pages": [
+    {
+      "id": "worldcup",
+      "source": "page.tsx",
+      "path": "worldcup",
+      "permission_level": 2,
+      "navigation": {
+        "enabled": true,
+        "icon": "Trophy",
+        "color": "text-amber-500",
+        "bg_color": "bg-amber-500/10",
+        "border_color": "group-hover:border-amber-500/50"
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+# mundial — World Cup 2026 data-capture.
+#
+# This compose has NO postgres service: it connects to the shared Postgres on the
+# `dbnet` network (defined in /home/iktdts/apps/infra/postgresdb). The `ingest`
+# service is a one-shot job that runs migrations + seeds the vendored data, then
+# exits. Run it with:  docker compose run --rm ingest
+services:
+  ingest:
+    build: ./ingest
+    container_name: mundial-ingest
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-mundial}
+      POSTGRES_DB: ${POSTGRES_DB:-mundial}
+    secrets:
+      - db_password
+    networks:
+      - intranet
+      - dbnet
+
+networks:
+  intranet:
+    external: true
+  dbnet:
+    external: true
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt

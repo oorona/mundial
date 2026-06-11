@@ -1,0 +1,117 @@
+# .gitignore for Discord Bot Platform Baseline
+
+# ============================================
+# SECRETS AND SENSITIVE DATA
+# ============================================
+secrets/
+*.secret
+*.key
+*.pem
+.env
+.env.local
+.env.*.local
+
+# ============================================
+# PYTHON
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ============================================
+# NODE / JAVASCRIPT
+# ============================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.next/
+out/
+.cache/
+.vercel
+.turbo
+
+# ============================================
+# DOCKER
+# ============================================
+*.log
+docker-compose.override.yml
+
+# ============================================
+# DATABASE
+# ============================================
+*.db
+*.sqlite
+*.sqlite3
+migrations/versions/*.py
+!migrations/versions/__init__.py
+
+# ============================================
+# IDE
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ============================================
+# TEMPORARY FILES
+# ============================================
+*.tmp
+*.temp
+*.bak
+*.backup
+tmp/
+temp/
+
+# ============================================
+# LOGS
+# ============================================
+logs/
+*.log
+loglevel
+
+# ============================================
+# TESTING
+# ============================================
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# ============================================
+# KEEP EXAMPLE FILES
+# ============================================
+!.env.example
+!secrets/.gitkeep

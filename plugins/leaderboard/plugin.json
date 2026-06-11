@@ -1,0 +1,40 @@
+{
+  "name": "leaderboard",
+  "display_name": "Mundial — Clasificación",
+  "version": "1.0.0",
+  "description": "Clasificación de la quiniela por servidor: tabla en vivo (SSE) y un mensaje único auto-actualizado en un canal de Discord.",
+  "permission_level": 2,
+  "worker": true,
+  "capabilities": ["sse"],
+  "components": {
+    "cog": true,
+    "api": true,
+    "models": false,
+    "migration": false,
+    "frontend": true,
+    "translations": true,
+    "prompts": false
+  },
+  "router": {
+    "prefix": "/guilds",
+    "tag": "leaderboard"
+  },
+  "pages": [
+    {
+      "id": "leaderboard",
+      "source": "page.tsx",
+      "path": "leaderboard",
+      "permission_level": 2,
+      "navigation": {
+        "enabled": true,
+        "icon": "Medal",
+        "color": "text-yellow-500",
+        "bg_color": "bg-yellow-500/10",
+        "border_color": "group-hover:border-yellow-500/50"
+      }
+    }
+  ],
+  "activity_pages": [
+    { "source": "activity.tsx", "path": "clasificacion" }
+  ]
+}

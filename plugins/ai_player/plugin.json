@@ -1,0 +1,37 @@
+{
+  "name": "ai_player",
+  "display_name": "Mundial — Jugador IA",
+  "version": "1.0.0",
+  "description": "Jugador máquina de la quiniela: pronostica el marcador de cada partido próximo usando IA con búsqueda en Google (consenso de internet). Sus pronósticos se puntúan y aparecen en la clasificación como un jugador más.",
+  "permission_level": 4,
+  "worker": true,
+  "components": {
+    "cog": true,
+    "api": false,
+    "models": false,
+    "migration": false,
+    "frontend": false,
+    "translations": true,
+    "prompts": true
+  },
+  "prompts": [
+    {
+      "context": "predict_fetch",
+      "label": "Pronóstico (búsqueda)",
+      "description": "Busca en internet el marcador más probable del partido con grounding.",
+      "files": [
+        {"name": "system_prompt", "label": "Sistema", "description": "Persona del analista que lee el consenso web."},
+        {"name": "user_prompt", "label": "Usuario", "description": "Plantilla por partido. Usa {home}, {away}, {day}."}
+      ]
+    },
+    {
+      "context": "predict_parse",
+      "label": "Pronóstico (JSON)",
+      "description": "Convierte el resumen en un marcador estricto (home_goals, away_goals).",
+      "files": [
+        {"name": "system_prompt", "label": "Sistema", "description": "Instrucción para extraer el JSON del marcador."},
+        {"name": "user_prompt", "label": "Usuario", "description": "Plantilla con {text} (el resumen con grounding)."}
+      ]
+    }
+  ]
+}

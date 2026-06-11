@@ -1,0 +1,33 @@
+[
+  {
+    "name": "worldcup_data",
+    "prefix": "/worldcup",
+    "tag": "worldcup_data"
+  },
+  {
+    "name": "fixtures_activity",
+    "prefix": "/activity-wc",
+    "tag": "fixtures_activity"
+  },
+  {
+    "name": "predictions",
+    "prefix": "/guilds",
+    "tag": "predictions",
+    "audit_exempt_paths": [
+      "/{guild_id}/predictions/submit",
+      "/{guild_id}/predictions/submit-batch",
+      "/{guild_id}/predictions/web-submit",
+      "/{guild_id}/predictions/web-submit-batch"
+    ]
+  },
+  {
+    "name": "leaderboard",
+    "prefix": "/guilds",
+    "tag": "leaderboard"
+  },
+  {
+    "name": "live_tracker",
+    "prefix": "/guilds",
+    "tag": "live_tracker"
+  }
+]

@@ -1,0 +1,27 @@
+# Required Permissions for Sample Bot
+# 
+# This file defines the Discord intents and guild permissions required by the bot.
+# The PermissionValidator checks these at startup and logs warnings/errors for any
+# missing permissions.
+#
+# Intents Reference: https://discordpy.readthedocs.io/en/stable/intents.html
+# Permissions Reference: https://discordpy.readthedocs.io/en/stable/api.html#discord.Permissions
+
+# Required Discord Gateway Intents
+# These must be enabled in the Discord Developer Portal for privileged intents
+intents:
+  - message_content  # Required for: logging.py (on_message_delete, on_message_edit)
+  - members          # Required for: logging.py (on_member_join, on_member_remove)
+  - guilds           # Required for: guild_sync.py (on_guild_join, on_guild_remove)
+
+# Required Guild Permissions
+# The bot role needs these permissions in each guild
+permissions:
+  - send_messages        # Required for: all cogs that send messages/embeds
+  - embed_links          # Required for: logging.py, status.py (sending embeds)
+  - read_message_history # Required for: logging.py (accessing message content)
+
+# Strict Mode Configuration
+# If true, the bot will refuse to start when permissions are missing
+# If false (default), the bot logs warnings but continues
+strict_mode: false

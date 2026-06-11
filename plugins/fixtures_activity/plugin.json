@@ -1,0 +1,39 @@
+{
+  "name": "fixtures_activity",
+  "display_name": "Mundial — App",
+  "version": "1.0.0",
+  "description": "App embebida del Mundial (Discord Activity): grupos con navegacion por niveles, vista de equipo y partido, cuadro de eliminatorias, sedes y mapa de ciudades. Reutilizable en el panel web.",
+  "permission_level": 2,
+  "components": {
+    "cog": false,
+    "api": true,
+    "models": false,
+    "migration": false,
+    "frontend": true,
+    "translations": true,
+    "prompts": false
+  },
+  "router": {
+    "prefix": "/activity-wc",
+    "tag": "fixtures_activity"
+  },
+  "pages": [
+    {
+      "id": "fixtures",
+      "source": "page.tsx",
+      "path": "fixtures",
+      "permission_level": 2,
+      "navigation": {
+        "enabled": true,
+        "icon": "Globe2",
+        "color": "text-sky-500",
+        "bg_color": "bg-sky-500/10",
+        "border_color": "group-hover:border-sky-500/50"
+      }
+    }
+  ],
+  "activity_pages": [
+    { "source": "hub.tsx", "path": "inicio" },
+    { "source": "activity.tsx", "path": "mundial" }
+  ]
+}

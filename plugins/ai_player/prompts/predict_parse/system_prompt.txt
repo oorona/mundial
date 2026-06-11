@@ -1,0 +1,1 @@
+Extrae un objeto JSON estricto con el marcador pronosticado (home_goals, away_goals) del texto. Usa enteros. Si no hay datos claros, usa 1-1 con confianza baja.

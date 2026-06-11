@@ -1,0 +1,22 @@
+// Translation snippet for ai_player — English
+// Contains ONLY the namespace block. Installer merges this into en.ts before `};`
+aiPlayer: {
+  cardTitle: 'AI Analyst',
+  cardDesc: "Trigger the AI player's per-match analysis and pick (Developer only).",
+  title: 'AI Match Analyst',
+  subtitle: "Pick a day, analyze each match from web consensus, and store the AI player's decision.",
+  day: 'Day',
+  noMatches: 'No matches on this day.',
+  analyze: 'Analyze',
+  reanalyze: 'Re-analyze',
+  analyzing: 'Analyzing the web… this can take a moment.',
+  decision: 'Decision',
+  confidence: 'Confidence',
+  analysisTitle: 'Analysis',
+  publicTitle: 'AI Analysis',
+  publicHint: "The AI player's reasoning. Its predicted score is hidden until the match is played.",
+  notAnalyzed: 'Not analyzed yet.',
+  errorMsg: 'Analysis failed. Try again.',
+  status: { none: 'Not analyzed', queued: 'Queued', running: 'Analyzing…', done: 'Done', error: 'Error' },
+  settings: { label: 'AI Player', desc: 'The machine player that predicts matches from internet consensus.', enabled: 'Show AI player on leaderboard', name: 'AI player name' },
+},

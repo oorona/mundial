@@ -1,0 +1,16 @@
+{
+  "name": "guild_limit",
+  "display_name": "Mundial — Límite de servidores",
+  "version": "1.0.0",
+  "description": "Limita cuántos servidores pueden añadir la app (guardarraíl de rendimiento). Si se supera MAX_GUILDS, el bot avisa al nuevo servidor y lo abandona; los servidores existentes no se tocan.",
+  "permission_level": 6,
+  "components": {
+    "cog": true,
+    "api": false,
+    "models": false,
+    "migration": false,
+    "frontend": false,
+    "translations": false,
+    "prompts": false
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "my_plugin",
+  "display_name": "My Plugin",
+  "version": "1.0.0",
+  "description": "Short description of what this plugin does.",
+  "permission_level": 3,
+  "components": {
+    "cog": true,
+    "api": true,
+    "models": false,
+    "migration": false,
+    "frontend": true,
+    "translations": true,
+    "prompts": false
+  },
+  "router": {
+    "prefix": "/guilds",
+    "tag": "my_plugin"
+  },
+  "navigation": {
+    "enabled": true,
+    "icon": "Settings",
+    "color": "text-blue-500",
+    "bg_color": "bg-blue-500/10",
+    "border_color": "group-hover:border-blue-500/50"
+  }
+}

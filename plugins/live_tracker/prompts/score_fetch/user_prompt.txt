@@ -1,0 +1,3 @@
+Partido de la Copa Mundial 2026: {home} vs {away}.
+
+Busca el marcador y el estado actuales, y la lista COMPLETA de eventos en orden: goles (con goleador y minuto, marca autogol/penal), tarjetas (jugador y minuto), cambios (entra/sale y minuto), tanda de penales y VAR. Indica para cada evento si es del equipo local ({home}) o visitante ({away}). Si no estás seguro, dilo.

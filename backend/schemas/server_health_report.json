@@ -1,0 +1,60 @@
+{
+  "id": "server_health_report",
+  "name": "Server Health Report",
+  "description": "Structured weekly summary of server activity, issues, and recommendations.",
+  "example_prompt": "Generate a health report for a Discord server with 500 members, 1200 messages this week, 3 moderation actions, and declining activity in #general.",
+  "schema": {
+    "type": "object",
+    "title": "ServerHealthReport",
+    "properties": {
+      "overall_health": {
+        "type": "string",
+        "enum": ["excellent", "good", "fair", "poor", "critical"],
+        "description": "Overall health rating of the server"
+      },
+      "activity_trend": {
+        "type": "string",
+        "enum": ["growing", "stable", "declining", "inactive"],
+        "description": "Activity trend over the reporting period"
+      },
+      "summary": {
+        "type": "string",
+        "description": "2-3 sentence executive summary"
+      },
+      "highlights": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Positive highlights from this period"
+      },
+      "issues": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "issue": { "type": "string" },
+            "severity": { "type": "string", "enum": ["low", "medium", "high"] },
+            "recommendation": { "type": "string" }
+          },
+          "required": ["issue", "severity", "recommendation"]
+        }
+      },
+      "top_channels": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "message_count": { "type": "integer" },
+            "sentiment": { "type": "string", "enum": ["positive", "neutral", "negative"] }
+          }
+        }
+      },
+      "recommendations": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Actionable recommendations for server improvement"
+      }
+    },
+    "required": ["overall_health", "activity_trend", "summary", "recommendations"]
+  }
+}

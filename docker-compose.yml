@@ -1,0 +1,148 @@
+# Single deployment format — same locally and in production; only .env changes per server.
+# Traefik (external, on the `internet` network) terminates TLS and routes the host:
+#   Host(`$APP_HOST`)                       → frontend:3000
+#   Host(`$APP_HOST`) && PathPrefix(`/api`) → backend:8000   (higher priority)
+# Required in .env: APP_NAME, APP_HOST, FRONTEND_URL, NEXT_PUBLIC_APP_NAME, DISCORD_CLIENT_ID.
+secrets:
+  encryption_key:
+    file: ./secrets/encryption_key
+
+services:
+  # Backend API (FastAPI)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    secrets:
+      - encryption_key
+    environment:
+      ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+      SETTINGS_FILE_PATH: /data/settings.enc
+      ENVIRONMENT: production
+      FRONTEND_URL: ${FRONTEND_URL}
+      MAX_GUILDS: ${MAX_GUILDS:-0}  # display-only on Platform Status; the bot enforces the cap
+    networks:
+      # Unique per-app alias: the shared intranet/dbnet networks host a `backend`
+      # service for EVERY framework app, so the default `backend` DNS name round-robins
+      # across all of them. Internal callers use ${APP_NAME}-backend instead.
+      intranet:
+        aliases:
+          - ${APP_NAME}-backend
+      dbnet:
+        aliases:
+          - ${APP_NAME}-backend
+    expose:
+      - "8000"
+    volumes:
+      - ./backend:/app
+      - platform_data:/data
+      - ./data/prompts:/data/prompts
+      - ./scripts:/scripts:ro
+    # Horizontally scaled: 5 backend instances behind Traefik (/api router) and the
+    # Docker DNS alias ${APP_NAME}-backend (both round-robin across replicas). One uvicorn
+    # worker per replica → exactly 5 API instances. The backend is stateless (state lives
+    # in Postgres/Redis) and never runs migrations on boot, so replicas are safe.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+    deploy:
+      replicas: 5
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/api/v1/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=intranet
+      - "traefik.http.routers.${APP_NAME}-api.rule=Host(`${APP_HOST}`) && PathPrefix(`/api`)"
+      - traefik.http.routers.${APP_NAME}-api.entrypoints=websecure
+      - traefik.http.routers.${APP_NAME}-api.tls=true
+      - traefik.http.routers.${APP_NAME}-api.tls.certresolver=cloudflare
+      - traefik.http.routers.${APP_NAME}-api.priority=100
+      - traefik.http.services.${APP_NAME}-api.loadbalancer.server.port=8000
+
+  # Discord Bot
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    secrets:
+      - encryption_key
+    environment:
+      ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+      SETTINGS_FILE_PATH: /data/settings.enc
+      ENVIRONMENT: production
+      BACKEND_BASE: http://${APP_NAME}-backend:8000  # unique host (avoids shared `backend` DNS clash)
+      MAX_GUILDS: ${MAX_GUILDS:-0}  # server cap (0 = unlimited); guild_limit cog leaves new servers over this
+    volumes:
+      - ./bot:/app
+      - platform_data:/data
+      - ./data/prompts:/data/prompts
+    networks:
+      - bot       # outbound default route → Discord API
+      - intranet  # backend API
+      - dbnet     # Postgres + Redis (worker cogs)
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_APP_NAME=${NEXT_PUBLIC_APP_NAME:-${APP_NAME}}
+        - NEXT_PUBLIC_DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID:-}
+    networks:
+      - internet  # Traefik reaches it here
+      - intranet  # server-side calls to backend
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      INTERNAL_API_URL: http://${APP_NAME}-backend:8000  # unique host (avoids shared `backend` DNS clash)
+    restart: always
+    healthcheck:
+      # node:20-alpine has no curl — use busybox wget (Traefik skips unhealthy containers).
+      test: [ "CMD", "wget", "-q", "-O", "-", "http://localhost:3000/api/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=internet
+      - "traefik.http.routers.${APP_NAME}.rule=Host(`${APP_HOST}`)"
+      - traefik.http.routers.${APP_NAME}.entrypoints=websecure
+      - traefik.http.routers.${APP_NAME}.tls=true
+      - traefik.http.routers.${APP_NAME}.tls.certresolver=cloudflare
+      - traefik.http.services.${APP_NAME}.loadbalancer.server.port=3000
+
+networks:
+  internet:
+    external: true
+    name: internet
+  intranet:
+    external: true
+    name: intranet
+  dbnet:
+    external: true
+    name: dbnet
+  bot:
+    external: true
+    name: bot
+
+volumes:
+  platform_data:
+    # Persists /data/settings.enc (the encrypted settings vault) across restarts.

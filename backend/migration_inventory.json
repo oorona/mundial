@@ -1,0 +1,85 @@
+{
+  "_comment": "Source of truth for framework and plugin migration versions. Written by install_plugin.sh (plugin section) and updated manually by framework developers (framework section). Never hardcode this data in version.py.",
+  "framework_version": "1.7.0",
+  "framework_migrations": [
+    {
+      "version": "1.0.0",
+      "description": "Initial schema — users, guilds, permissions, audit log, LLM tracking, app config",
+      "revisions": [
+        "c8d4e5f6a7b9"
+      ],
+      "head_revision": "c8d4e5f6a7b9"
+    },
+    {
+      "version": "1.1.0",
+      "description": "Guild isolation — PostgreSQL Row-Level Security on all guild-scoped tables",
+      "revisions": [
+        "d2e3f4a5b6c7"
+      ],
+      "head_revision": "d2e3f4a5b6c7"
+    },
+    {
+      "version": "1.2.0",
+      "description": "Migration history — audit trail of every schema upgrade (who, when, duration, result)",
+      "revisions": [
+        "e3f4a5b6c7d8"
+      ],
+      "head_revision": "e3f4a5b6c7d8"
+    },
+    {
+      "version": "1.3.0",
+      "description": "Instrumentation — card_usage, guild_events, request_metrics, bot_command_metrics tables; app_config table for dynamic runtime configuration",
+      "revisions": [
+        "f1a2b3c4d5e6",
+        "e1f2a3b4c5d6",
+        "a1b2c3d4e5f6"
+      ],
+      "head_revision": "a1b2c3d4e5f6"
+    },
+    {
+      "version": "1.4.0",
+      "description": "Fix RLS policies — guard NULLIF empty-string cast to bigint, bypass check first",
+      "revisions": [
+        "b2c3d4e5f6a7"
+      ],
+      "head_revision": "b2c3d4e5f6a7"
+    },
+    {
+      "version": "1.5.0",
+      "description": "Public site surface — globally-unique guild slug for Level 0 per-server public sites (configurable /p prefix)",
+      "revisions": [
+        "d4f6a8c0b2e1"
+      ],
+      "head_revision": "d4f6a8c0b2e1"
+    },
+    {
+      "version": "1.6.0",
+      "description": "Harden guild RLS — allow guild_id IS NULL inserts on llm_usage/llm_usage_summary (system/global LLM cost rows) and degrade an empty-string guild context to NULL instead of erroring",
+      "revisions": [
+        "b7c8d9e0f1a2"
+      ],
+      "head_revision": "b7c8d9e0f1a2"
+    },
+    {
+      "version": "1.7.0",
+      "description": "Editable LLM Configs storage — llm_schemas + llm_function_sets (global tables backing the dashboard structured-output schema + function-calling set editors). Ported from baseline; re-id'd from c1d2e3f4a5b6 to e5f6a7b8c9d0 to avoid colliding with the ai_player plugin migration, still on the independent framework branch.",
+      "revisions": [
+        "e5f6a7b8c9d0"
+      ],
+      "head_revision": "e5f6a7b8c9d0"
+    }
+  ],
+  "plugin_migrations": [
+    {
+      "plugin": "plugins",
+      "version": "1.0.0",
+      "description": "Rama única de la app del Mundial (el framework permanece independiente): worldcup_data (datos: equipos, grupos, partidos, bracket), predictions (quiniela con RLS por servidor) y ai_player (jugador IA: análisis por partido con grounding y decisión almacenada). Todas las migraciones de la app van en esta rama, en orden: worldcup_data → predictions → ai_player.",
+      "revisions": [
+        "aabbccddeeff",
+        "b2c3d4e5f6a8",
+        "c1d2e3f4a5b6"
+      ],
+      "head_revision": "c1d2e3f4a5b6"
+    }
+  ]
+}

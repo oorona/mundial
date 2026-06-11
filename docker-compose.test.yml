@@ -1,0 +1,83 @@
+# Baseline Framework — Test Compose Override
+# ===========================================
+# Runs the live test suite against the running stack.
+#
+# USAGE:
+#   # 1. Start the main stack first:
+#   docker compose up -d
+#
+#   # 2. Run the tests (one-shot, no auth):
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml run --rm test-runner
+#
+#   # 3. Run with secrets from .env.test.local (recommended — file is gitignored):
+#   cp .env.test.local.example .env.test.local   # first time only
+#   # edit .env.test.local with real values, then:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml \
+#     --env-file .env.test.local run --rm test-runner
+#
+#   # 4. Watch mode — continuously re-runs on file change (requires watchdog):
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up test-runner
+#
+# OUTPUT:
+#   Each test shows: [PASS/FAIL/SKIP]  test name  response_time_ms
+#   Final summary table: per-suite pass/fail counts + avg/max response times
+#
+# NETWORK:
+#   The test runner joins the existing `intranet` and `internet` networks so it
+#   can reach both the gateway (external-facing tests) and backend (internal tests).
+#   No ports are exposed.
+
+services:
+  test-runner:
+    build:
+      context: ./tests/runner
+      dockerfile: Dockerfile
+    container_name: baseline-test-runner
+    environment:
+      # Where to send requests
+      GATEWAY_URL: "http://gateway"
+      BACKEND_URL: "http://backend:8000"
+
+      # Optional: set to a valid API token to enable authenticated (L2+) tests.
+      # Generate one by logging into the frontend, then paste the token from
+      # localStorage key 'access_token'.
+      TEST_API_TOKEN: "${TEST_API_TOKEN:-}"
+
+      # Optional: Discord guild ID the test token has owner/admin access to.
+      # Enables guild-settings shape tests and audit log mutation tests.
+      TEST_GUILD_ID: "${TEST_GUILD_ID:-}"
+
+      # Optional: a Discord user ID that can be added/removed as authorized user
+      # in TEST_GUILD_ID.  Enables authorized-user audit log tests.
+      TEST_USER_ID: "${TEST_USER_ID:-}"
+
+      # Optional: a Discord role ID in TEST_GUILD_ID that can be added/removed.
+      # Enables authorized-role audit log tests.
+      TEST_ROLE_ID: "${TEST_ROLE_ID:-}"
+
+      # How many requests to send in rate limit burst tests.
+      RATE_LIMIT_BURST_SIZE: "${RATE_LIMIT_BURST_SIZE:-20}"
+
+    networks:
+      - internet   # Reaches the gateway (full-stack tests)
+      - intranet   # Reaches the backend directly (internal tests)
+
+    # Do not restart automatically — run once and exit
+    restart: "no"
+
+    depends_on:
+      gateway:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+    # Override the default CMD to run once with a clean exit code
+    command: ["python", "run_tests.py"]
+
+networks:
+  internet:
+    external: true
+    name: internet
+  intranet:
+    external: true
+    name: intranet

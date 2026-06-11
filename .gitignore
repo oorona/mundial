@@ -1,0 +1,72 @@
+#.gitignore
+# Dependencies
+node_modules/
+.pnpm-store
+.npm
+
+# Next.js
+.next/
+out/
+build/
+dist/
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+.env*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+coverage/
+
+# Misc
+.vercel
+secrets/
+!secrets/.gitkeep
+
+# Live runtime prompt files — host-owned, edited from the dashboard (LLM Configs →
+# Plugin Prompts). The tracked source of truth is plugins/<name>/prompts/; the installer
+# (or a manual push) materializes these on the host. Excluded from deploy sync so a
+# deploy's rsync --delete can never overwrite or wipe admin edits. To change a default,
+# edit plugins/<name>/prompts/ and re-run the installer / push the file explicitly.
+data/prompts/
+
+# ============================================
+# SAMPLE BOT / PLUGINS (DO NOT COMMIT)
+# ============================================
+# frontend/app/dashboard/developer/logging/
+# frontend/app/dashboard/[guildId]/logging/
+#bot/cogs/logging.py
+#frontend/app/dashboard/[guildId]/test-l1/
+#frontend/app/dashboard/[guildId]/test-l2/
+# In THIS project the plugins ARE the product code, so plugins/ is fully tracked
+# (unlike the base framework, where plugins/ holds samples and is ignored). The
+# sample/demo plugins have been removed from this project.
+
+# --- deploy convention (tools/fixdeploy.sh) ---
+.env.local
+.env.prod
+.env.test
+secrets.prod/
+secrets.test/
+# --- /deploy convention ---
