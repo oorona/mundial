@@ -125,14 +125,14 @@ class LiveTracker(commands.Cog):
     def cog_unload(self):
         self.tick.cancel()
 
-    @tasks.loop(seconds=120)
+    @tasks.loop(seconds=300)
     async def tick(self):
         if not self.db:
             return
         provider = self.llm.providers.get("google") if (self.llm and self.llm.providers) else None
         inwindow = await self._read_inwindow()
         if inwindow:
-            # ── LIVE mode (every 2 min during a game window): AI score + events ──
+            # ── LIVE mode (every 5 min during a game window): AI score + events ──
             await self._fresh_window_wipe()
             ai: dict[int, dict] = {}
             for m in inwindow:
@@ -154,7 +154,7 @@ class LiveTracker(commands.Cog):
             # ── NEWS mode (every 8h when nothing is live): AI news about the next/
             # inauguration match → channel + app feed. Confirms the AI pipeline.
             # The inauguration is not a match, so it refreshes slowly (8h); a real
-            # match in window switches to LIVE mode above (2-min cadence). ──
+            # match in window switches to LIVE mode above (5-min cadence). ──
             if self.redis:
                 try:
                     await self.redis.delete("live:window_active")
@@ -246,13 +246,29 @@ class LiveTracker(commands.Cog):
         new_goals: list[dict] = []
         for m in snapshot:
             score = f"{m['hs']}–{m['as_']}" if m["hs"] is not None else "vs"
-            state = "Final" if m["finished"] else _state_es(m["te"])
-            line = f"{m['home']} {score} {m['away']} · {state}"
-            if self._last_feed.get(m["id"]) != line:
-                self._last_feed[m["id"]] = line
-                await self._push_event({"type": "live", "match_id": m["id"], "home": m["home"], "away": m["away"],
-                                        "home_score": m["hs"], "away_score": m["as_"], "state": state,
-                                        "text": line, "ts": int(time.time())})
+            # Clear bookends: an explicit kickoff marker once the game is underway,
+            # and a single final marker — Redis-deduped, so once each per match.
+            underway = str(m["te"] or "").strip().lower() not in ("", "notstarted", "not_started")
+            if not m["finished"] and underway and await self._first_time(m["id"], "kickoff"):
+                await self._push_event({"type": "kickoff", "match_id": m["id"], "home": m["home"],
+                                        "away": m["away"],
+                                        "text": f"🏟️ ¡Comienza el partido! {m['home']} vs {m['away']}",
+                                        "ts": int(time.time())})
+            if m["finished"]:
+                if await self._first_time(m["id"], "final"):
+                    await self._push_event({"type": "final", "match_id": m["id"], "home": m["home"],
+                                            "away": m["away"], "home_score": m["hs"], "away_score": m["as_"],
+                                            "text": f"🏁 Final del partido: {m['home']} {score} {m['away']}",
+                                            "ts": int(time.time())})
+                # No more score lines after the final marker.
+            else:
+                state = _state_es(m["te"])
+                line = f"{m['home']} {score} {m['away']} · {state}"
+                if self._last_feed.get(m["id"]) != line:
+                    self._last_feed[m["id"]] = line
+                    await self._push_event({"type": "live", "match_id": m["id"], "home": m["home"], "away": m["away"],
+                                            "home_score": m["hs"], "away_score": m["as_"], "state": state,
+                                            "text": line, "ts": int(time.time())})
 
             # Granular events (goals/cards/subs/…): announce each only once. The
             # dedup context is PERSISTED in Redis (live:seen:{match}) so restarts
@@ -265,7 +281,12 @@ class LiveTracker(commands.Cog):
                 etype = _norm_event_type(ev.get("type"))
                 if not etype:
                     continue
-                player = str(ev.get("player") or "").strip()
+                # If it isn't clear, don't post it: a card/sub with an unknown player
+                # is noise ("🟥 unknown desconocido"). Goals are the exception — the
+                # score itself is the substance, and the budget cap dedups them.
+                if etype not in ("goal", "own_goal", "penalty_goal") and not _known(ev.get("player")):
+                    continue
+                player = _known(ev.get("player"))
                 minute = str(ev.get("minute") or "").strip()
                 key = _event_key(ev, etype)
                 if key in seen:
@@ -284,6 +305,26 @@ class LiveTracker(commands.Cog):
                     if await self._goal_budget_ok(m["id"], r):
                         new_goals.append({"home": m["home"], "away": m["away"], "ev": ev, "etype": etype})
         return new_goals
+
+    async def _final_confirmed(self, match_id: int) -> bool:
+        """Debounce the AI's 'finished' flag: True only on the SECOND consecutive
+        poll that reports the game over (marker survives restarts via Redis)."""
+        if not self.redis:
+            return True
+        try:
+            pending = await self.redis.get(f"live:final_pending:{match_id}")
+            await self.redis.set(f"live:final_pending:{match_id}", "1", ex=900)
+            return bool(pending)
+        except Exception:
+            return True
+
+    async def _clear_final_pending(self, match_id: int):
+        if not self.redis:
+            return
+        try:
+            await self.redis.delete(f"live:final_pending:{match_id}")
+        except Exception:
+            pass
 
     async def _first_time(self, match_id: int, key: str) -> bool:
         """Redis-persisted event dedup (survives restarts); True if never reported."""
@@ -629,24 +670,29 @@ class LiveTracker(commands.Cog):
                 continue
             committed = False
             if auto_commit and r.get("finished") and float(r.get("confidence", 0)) >= threshold:
-                # Time floor: a 90'+HT match physically can't end before kickoff+105';
-                # the AI sometimes calls it during stoppage time, which kills the
-                # stream early (finished=true leaves the polling window). Hold the
-                # commit until kickoff+115' — worst case the final lands a tick late.
-                res = await s.execute(
-                    text("""
-                        UPDATE matches
-                        SET home_score = :hs, away_score = :as_, finished = true,
-                            home_pens = :hp, away_pens = :ap, time_elapsed = 'FT'
-                        WHERE id = :id AND finished = false
-                          AND kickoff_at <= now() - interval '115 minutes'
-                    """),
-                    {"hs": int(r["home_score"]), "as_": int(r["away_score"]),
-                     "hp": r.get("home_pens"), "ap": r.get("away_pens"), "id": m["id"]},
-                )
-                committed = bool(res.rowcount)
-                if not committed:
-                    log.info("live_tracker: AI reported final for match %s before 115' — holding commit", m["id"])
+                # Two guards against cutting the stream early, while still ending it
+                # promptly once the game is really over (no token-burning overtime):
+                # 1. debounce — TWO consecutive polls must agree it's finished (one
+                #    bad search result can't end the stream);
+                # 2. physical floor — 90'+HT can't end before kickoff+105'.
+                # Once both pass, finished=true commits and polling stops entirely.
+                if await self._final_confirmed(m["id"]):
+                    res = await s.execute(
+                        text("""
+                            UPDATE matches
+                            SET home_score = :hs, away_score = :as_, finished = true,
+                                home_pens = :hp, away_pens = :ap, time_elapsed = 'FT'
+                            WHERE id = :id AND finished = false
+                              AND kickoff_at <= now() - interval '105 minutes'
+                        """),
+                        {"hs": int(r["home_score"]), "as_": int(r["away_score"]),
+                         "hp": r.get("home_pens"), "ap": r.get("away_pens"), "id": m["id"]},
+                    )
+                    committed = bool(res.rowcount)
+                    if not committed:
+                        log.info("live_tracker: AI reported final for match %s before 105' — holding commit", m["id"])
+            else:
+                await self._clear_final_pending(m["id"])
             if not committed:
                 # Held finals show as deep stoppage, not "Final" — the stream is still on.
                 te = str(r.get("minute") or ("90'+" if r.get("finished") else r.get("status")) or "")[:20]
@@ -1061,18 +1107,43 @@ def _team_name(ev, home, away) -> str:
     return str(ev.get("team") or "").strip()  # already a team name, or empty
 
 
+# Every event line says WHAT happened in words — emoji alone is ambiguous
+# (🟥 read as "red ball", 🔄 as "update").
+_EVENT_LABEL_ES = {
+    "goal": "GOL", "own_goal": "GOL en propia puerta", "penalty_goal": "GOL de penal",
+    "penalty_miss": "Penal fallado", "yellow": "Tarjeta amarilla", "red": "Tarjeta roja",
+    "second_yellow": "Segunda amarilla (expulsión)", "substitution": "Cambio",
+    "var": "Revisión del VAR",
+}
+
+_UNKNOWN_WORDS = ("desconocido", "unknown", "n/a", "na", "unknown desconocido", "tbd")
+
+
+def _known(value) -> str:
+    """The value, or '' when it's a placeholder the AI uses for 'no idea'."""
+    s = str(value or "").strip()
+    return "" if s.lower() in _UNKNOWN_WORDS else s
+
+
+def _clean_minute(ev) -> str:
+    """Minute when it really is one ("67'", "45+2'"); '' for vague values ("2T", "HT")."""
+    raw = str(ev.get("minute") or "").strip().rstrip("'")
+    return f"{raw}'" if re.fullmatch(r"\d{1,3}(\+\d{1,2})?", raw or "") else ""
+
+
 def _fmt_event(ev, etype, home, away) -> str:
-    """One human line for an event, e.g. '⚽ 23' L. Messi (Argentina) — assist: Di María'."""
+    """One human line, e.g. \"🟥 Tarjeta roja 46' — S. Sithole (South Africa) — Falta\"."""
     emoji = _EVENT_EMOJI.get(etype, "•")
-    minute = str(ev.get("minute") or "").strip()
-    if minute and minute[:1].isdigit() and not minute.endswith("'"):
-        minute = f"{minute}'"
-    player = str(ev.get("player") or "").strip()
-    detail = str(ev.get("detail") or "").strip()
+    label = _EVENT_LABEL_ES.get(etype, etype.replace("_", " "))
+    minute = _clean_minute(ev)
+    player = _known(ev.get("player"))
+    detail = _known(ev.get("detail"))
     team = _team_name(ev, home, away)
-    label = player or etype.replace("_", " ")
-    line = " ".join(p for p in (emoji, minute, label) if p)
-    if team:
+    line = f"{emoji} {label}" + (f" {minute}" if minute else "")
+    who = player or (team if etype in ("goal", "own_goal", "penalty_goal") else "")
+    if who:
+        line += f" — {who}"
+    if player and team:
         line += f" ({team})"
     if detail and detail.lower() != player.lower():
         line += f" — {detail}"
