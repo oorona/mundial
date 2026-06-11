@@ -254,11 +254,6 @@ class LiveTracker(commands.Cog):
                     new_goals.append({"home": m["home"], "away": m["away"], "ev": ev, "etype": etype})
         return new_goals
 
-    # The gif-bot user pinged after every confirmed goal announcement. NOTE: other
-    # bots ignore messages authored by bots, so this ping only works if that bot is
-    # configured to react to bot messages — the Tenor path below is the reliable one.
-    GOAL_GIF_USER_ID = 1355258979789312100
-
     # Klipy goal gifs — ported from staffai utils/native_tools.py (Klipy is that
     # bot's primary gif provider). Gif providers rank deterministically (same
     # query → same top result), so over-fetch a pool and pick at random, also
@@ -368,18 +363,11 @@ class LiveTracker(commands.Cog):
                         f"{ping}⚽ ¡GOOOL de **{scorer or home}** contra **{other}**!{detail}",
                         allowed_mentions=discord.AllowedMentions(roles=True),
                     )
-                    # Post the gif ourselves via Tenor when a key is configured (bots
-                    # ignore pings from other bots, so the gif-bot path rarely works).
+                    # Post the gif ourselves via Klipy (bots ignore pings from other
+                    # bots, so asking a gif bot never works). No gif → just skip it.
                     gif = await self._goal_gif(scorer or home)
                     if gif:
                         await channel.send(gif)
-                    else:
-                        # Include the scoring team (and player/minute when known) so each
-                        # gif request is a distinct message, not a repeated identical line.
-                        await channel.send(
-                            f"<@{self.GOAL_GIF_USER_ID}> goal of {scorer or home}{detail} — find a goal gif",
-                            allowed_mentions=discord.AllowedMentions(users=True),
-                        )
                 except discord.HTTPException as e:
                     log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
 
