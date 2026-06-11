@@ -120,14 +120,14 @@ class LiveTracker(commands.Cog):
     def cog_unload(self):
         self.tick.cancel()
 
-    @tasks.loop(seconds=300)
+    @tasks.loop(seconds=120)
     async def tick(self):
         if not self.db:
             return
         provider = self.llm.providers.get("google") if (self.llm and self.llm.providers) else None
         inwindow = await self._read_inwindow()
         if inwindow:
-            # ── LIVE mode (every 5 min during a game window): AI score + events ──
+            # ── LIVE mode (every 2 min during a game window): AI score + events ──
             ai: dict[int, dict] = {}
             for m in inwindow:
                 r = await self._ai_for_match(provider, m) if provider else None
@@ -148,7 +148,7 @@ class LiveTracker(commands.Cog):
             # ── NEWS mode (every 8h when nothing is live): AI news about the next/
             # inauguration match → channel + app feed. Confirms the AI pipeline.
             # The inauguration is not a match, so it refreshes slowly (8h); a real
-            # match in window switches to LIVE mode above (5-min cadence). ──
+            # match in window switches to LIVE mode above (2-min cadence). ──
             await self._maybe_news(provider)
 
     @tick.before_loop
@@ -380,7 +380,7 @@ class LiveTracker(commands.Cog):
             await self.redis.set("live:news:last_ts", now)
             # Inauguration is not a match: keep its card to a single fresh item rather
             # than a growing pile of hourly posts. Clear the shared feed before posting
-            # the 8h update; LIVE mode (every 5 min) repopulates it once a game is in
+            # the 8h update; LIVE mode (every 2 min) repopulates it once a game is in
             # window, so real matches — including the opener — keep their rolling feed.
             await self.redis.delete("live:events", "live:events:recent")
         except Exception:
