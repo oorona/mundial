@@ -13,7 +13,9 @@ import json
 import logging
 import os
 import random
+import re
 import time
+import unicodedata
 
 import discord
 from discord import app_commands
@@ -231,7 +233,9 @@ class LiveTracker(commands.Cog):
                                         "home_score": m["hs"], "away_score": m["as_"], "state": state,
                                         "text": line, "ts": int(time.time())})
 
-            # Granular events (goals/cards/subs/…): announce each only once.
+            # Granular events (goals/cards/subs/…): announce each only once. The
+            # dedup context is PERSISTED in Redis (live:seen:{match}) so restarts
+            # don't re-report, with keys normalized against AI wording wobble.
             r = ai.get(m["id"]) or {}
             seen = self._seen_events.setdefault(m["id"], set())
             for ev in (r.get("events") or []):
@@ -242,8 +246,11 @@ class LiveTracker(commands.Cog):
                     continue
                 player = str(ev.get("player") or "").strip()
                 minute = str(ev.get("minute") or "").strip()
-                key = f"{etype}|{minute.lower()}|{str(ev.get('team') or '').lower()}|{player.lower()}"
+                key = _event_key(ev, etype)
                 if key in seen:
+                    continue
+                if not await self._first_time(m["id"], key):
+                    seen.add(key)
                     continue
                 seen.add(key)
                 text = _fmt_event(ev, etype, m["home"], m["away"])
@@ -251,8 +258,40 @@ class LiveTracker(commands.Cog):
                                         "away": m["away"], "player": player, "minute": minute,
                                         "text": text, "ts": int(time.time())})
                 if etype in ("goal", "own_goal", "penalty_goal"):
-                    new_goals.append({"home": m["home"], "away": m["away"], "ev": ev, "etype": etype})
+                    # Extra guard: never announce more goals than the scoreboard
+                    # holds — a re-worded old goal slips past key dedup but not this.
+                    if await self._goal_budget_ok(m["id"], r):
+                        new_goals.append({"home": m["home"], "away": m["away"], "ev": ev, "etype": etype})
         return new_goals
+
+    async def _first_time(self, match_id: int, key: str) -> bool:
+        """Redis-persisted event dedup (survives restarts); True if never reported."""
+        if not self.redis:
+            return True
+        try:
+            rkey = f"live:seen:{match_id}"
+            added = await self.redis.sadd(rkey, key)
+            await self.redis.expire(rkey, 21600)  # 6h — outlives any match
+            return bool(added)
+        except Exception:
+            return True
+
+    async def _goal_budget_ok(self, match_id: int, r: dict) -> bool:
+        """Cap goal announcements at the AI's reported total score (Redis-persisted):
+        a goal can only be announced while announced-count < home+away goals."""
+        if not self.redis:
+            return True
+        try:
+            total = int(r.get("home_score") or 0) + int(r.get("away_score") or 0)
+            rkey = f"live:goals_announced:{match_id}"
+            prev = int(await self.redis.get(rkey) or 0)
+            if prev >= total:
+                return False
+            await self.redis.incr(rkey)
+            await self.redis.expire(rkey, 21600)
+            return True
+        except Exception:
+            return True
 
     # Klipy goal gifs — ported from staffai utils/native_tools.py (Klipy is that
     # bot's primary gif provider). Gif providers rank deterministically (same
@@ -574,10 +613,29 @@ class LiveTracker(commands.Cog):
                      "hp": r.get("home_pens"), "ap": r.get("away_pens"), "id": m["id"]},
                 )
             else:
-                await s.execute(
-                    text("UPDATE matches SET time_elapsed = :te WHERE id = :id AND finished = false"),
-                    {"te": str(r.get("minute") or r.get("status") or "")[:20], "id": m["id"]},
-                )
+                te = str(r.get("minute") or r.get("status") or "")[:20]
+                hs, as_ = r.get("home_score"), r.get("away_score")
+                if (hs is not None and as_ is not None
+                        and str(r.get("status") or "").lower() != "notstarted"
+                        and float(r.get("confidence", 0)) >= 0.6):
+                    # Keep the LIVE score on the matches row too (final commit above
+                    # only fires at FT) — embeds/boards read from here. GREATEST
+                    # guards against AI wobble briefly walking a score backwards.
+                    await s.execute(
+                        text("""
+                            UPDATE matches
+                            SET home_score = GREATEST(COALESCE(home_score, 0), :hs),
+                                away_score = GREATEST(COALESCE(away_score, 0), :as_),
+                                time_elapsed = :te
+                            WHERE id = :id AND finished = false
+                        """),
+                        {"hs": int(hs), "as_": int(as_), "te": te, "id": m["id"]},
+                    )
+                else:
+                    await s.execute(
+                        text("UPDATE matches SET time_elapsed = :te WHERE id = :id AND finished = false"),
+                        {"te": te, "id": m["id"]},
+                    )
 
     # ── Recompute standings ──────────────────────────────────────────────────────
     async def _recompute_standings(self, s):
@@ -922,6 +980,18 @@ _EVENT_ALIASES = {
     "double_yellow": "second_yellow", "second_yellow_card": "second_yellow",
     "sub": "substitution", "cambio": "substitution", "substitucion": "substitution",
 }
+
+
+def _event_key(ev, etype) -> str:
+    """Stable dedup key for an event — tolerant to AI wording wobble across polls
+    ("23" vs "23'", "R. Jiménez" vs "Raúl Jiménez", accents, middle names)."""
+    minute = re.sub(r"[^0-9+]", "", str(ev.get("minute") or ""))
+    player = str(ev.get("player") or "").strip().lower()
+    player = unicodedata.normalize("NFKD", player).encode("ascii", "ignore").decode()
+    parts = player.replace(".", " ").split()
+    player = parts[-1] if parts else ""
+    team = str(ev.get("team") or "").strip().lower()
+    return f"{etype}|{minute}|{team}|{player}"
 
 
 def _norm_event_type(t):
