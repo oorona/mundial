@@ -259,53 +259,72 @@ class LiveTracker(commands.Cog):
     # configured to react to bot messages — the Tenor path below is the reliable one.
     GOAL_GIF_USER_ID = 1355258979789312100
 
-    # Giphy goal gifs — ported from staffai utils/native_tools.py. Giphy ranks
-    # deterministically (same query → same top result), so over-fetch a pool and
-    # pick at random, also skipping recently used gifs, to avoid repeats.
-    _GIPHY_RENDITIONS = ("downsized", "downsized_medium", "downsized_large", "fixed_width", "original")
+    # Klipy goal gifs — ported from staffai utils/native_tools.py (Klipy is that
+    # bot's primary gif provider). Gif providers rank deterministically (same
+    # query → same top result), so over-fetch a pool and pick at random, also
+    # skipping recently used gifs, to avoid repeats.
+    # API: GET https://api.klipy.com/api/v1/{app_key}/gifs/search — auth via key
+    # in the URL path; response {result, data: {data: [items]}}; each item has
+    # file{hd|md|sm|xs}{gif|mp4|webp}{url}. Prefer large + gif (Discord-friendly).
+    _KLIPY_DIMS = ("hd", "md", "sm", "xs")
+    _KLIPY_FORMATS = ("gif", "mp4", "webp")
     _GIF_POOL = 25
 
     @staticmethod
-    def _giphy_key() -> str | None:
+    def _klipy_key() -> str | None:
         # staffai pattern: docker secret first, env fallback.
         try:
-            with open("/run/secrets/giphy_api_key") as f:
+            with open("/run/secrets/klipy_api_key") as f:
                 v = f.read().strip()
             if v:
                 return v
         except OSError:
             pass
-        return (os.environ.get("GIPHY_API_KEY") or "").strip() or None
+        return (os.environ.get("KLIPY_API_KEY") or "").strip() or None
+
+    @classmethod
+    def _best_klipy_url(cls, item: dict) -> str | None:
+        file = item.get("file") or {}
+        if not isinstance(file, dict):
+            return None
+        for dim in cls._KLIPY_DIMS:
+            bucket = file.get(dim)
+            if not isinstance(bucket, dict):
+                continue
+            for fmt in cls._KLIPY_FORMATS:
+                entry = bucket.get(fmt)
+                if isinstance(entry, dict) and entry.get("url"):
+                    return entry["url"]
+                if isinstance(entry, str) and entry:
+                    return entry
+        return None
 
     async def _goal_gif(self, team: str) -> str | None:
-        """Fetch a goal-celebration gif URL from Giphy; returns None when the key is
+        """Fetch a goal-celebration gif URL from Klipy; returns None when the key is
         missing or on any API hiccup so the caller can fall back to the gif-bot ping."""
-        key = self._giphy_key()
+        key = self._klipy_key()
         if not key:
             return None
         # Vary the query too, not just the pick — more variety across goals.
         q = random.choice((f"{team} gol", f"{team} goal celebration",
                            "golazo celebracion", "goal celebration futbol"))
-        params = {"api_key": key, "q": q[:50], "limit": self._GIF_POOL, "lang": "es",
-                  "rating": "pg", "bundle": "messaging_non_clips"}
+        params = {"q": q, "page": 1, "per_page": self._GIF_POOL, "content_filter": "low"}
         try:
-            async with self.bot.session.get("https://api.giphy.com/v1/gifs/search", params=params) as resp:
+            async with self.bot.session.get(
+                f"https://api.klipy.com/api/v1/{key}/gifs/search", params=params
+            ) as resp:
                 if resp.status != 200:
-                    log.warning("live_tracker: giphy search failed (%s)", resp.status)
+                    log.warning("live_tracker: klipy search failed (%s)", resp.status)
                     return None
                 data = await resp.json()
         except Exception as e:
-            log.warning("live_tracker: giphy search error: %r", e)
+            log.warning("live_tracker: klipy search error: %r", e)
             return None
-        urls = []
-        for g in data.get("data") or []:
-            images = g.get("images") or {}
-            for r in self._GIPHY_RENDITIONS:
-                d = images.get(r) or {}
-                u = d.get("url") or d.get("webp")
-                if u:
-                    urls.append(u)
-                    break
+        if not data.get("result"):
+            log.warning("live_tracker: klipy returned unsuccessful result")
+            return None
+        items = (data.get("data") or {}).get("data") or []
+        urls = [u for u in (self._best_klipy_url(i) for i in items if isinstance(i, dict)) if u]
         if not urls:
             return None
         fresh = [u for u in urls if u not in self._recent_gifs] or urls

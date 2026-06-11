@@ -6,8 +6,8 @@
 secrets:
   encryption_key:
     file: ./secrets/encryption_key
-  giphy_api_key:
-    file: ./secrets/giphy_api_key
+  klipy_api_key:
+    file: ./secrets/klipy_api_key
 
 services:
   # Backend API (FastAPI)
@@ -71,7 +71,7 @@ services:
       dockerfile: Dockerfile
     secrets:
       - encryption_key
-      - giphy_api_key  # goal gifs (live_tracker); falls back to pinging the gif bot if absent
+      - klipy_api_key  # goal gifs (live_tracker); falls back to pinging the gif bot if absent
     environment:
       ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
       SETTINGS_FILE_PATH: /data/settings.enc
