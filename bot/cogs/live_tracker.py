@@ -225,7 +225,7 @@ class LiveTracker(commands.Cog):
         new_goals: list[dict] = []
         for m in snapshot:
             score = f"{m['hs']}–{m['as_']}" if m["hs"] is not None else "vs"
-            state = "FT" if m["finished"] else (m["te"] or "EN JUEGO")
+            state = "Final" if m["finished"] else _state_es(m["te"])
             line = f"{m['home']} {score} {m['away']} · {state}"
             if self._last_feed.get(m["id"]) != line:
                 self._last_feed[m["id"]] = line
@@ -784,7 +784,7 @@ class LiveTracker(commands.Cog):
             return embed
         for m in snapshot:
             score = f"{m['hs']}–{m['as_']}" if m["hs"] is not None else "vs"
-            state = "FINAL" if m["finished"] else (m["te"] or "EN JUEGO")
+            state = "FINAL" if m["finished"] else _state_es(m["te"]).upper()
             embed.add_field(name=f"{m['home']} {score} {m['away']}", value=state, inline=False)
         return embed
 
@@ -906,7 +906,7 @@ class LiveTracker(commands.Cog):
 
     def _match_embed(self, m, accent_hex: str, events=None) -> discord.Embed:
         score = f"{m['hs']}–{m['as_']}" if m["hs"] is not None else "vs"
-        state = "🏁 FINAL" if m["finished"] else f"🔴 {m['te'] or 'EN JUEGO'}"
+        state = "🏁 FINAL" if m["finished"] else f"🔴 {_state_es(m['te']).upper()}"
         embed = discord.Embed(
             title=f"{m['home']} {score} {m['away']}", description=state, color=_color(accent_hex))
         if m.get("hp") is not None and m.get("ap") is not None:
@@ -980,6 +980,21 @@ _EVENT_ALIASES = {
     "double_yellow": "second_yellow", "second_yellow_card": "second_yellow",
     "sub": "substitution", "cambio": "substitution", "substitucion": "substitution",
 }
+
+
+# time_elapsed holds either a minute ("47'") or a raw AI status word — map the
+# status words to user-facing Spanish; minutes pass through untouched.
+_STATE_ES = {
+    "notstarted": "Por comenzar", "not_started": "Por comenzar",
+    "live": "En juego", "inprogress": "En juego", "in_progress": "En juego",
+    "halftime": "Descanso", "ht": "Descanso",
+    "penalties": "Penales", "finished": "Final", "ft": "Final", "fulltime": "Final",
+}
+
+
+def _state_es(te) -> str:
+    t = str(te or "").strip()
+    return _STATE_ES.get(t.lower().replace(" ", "_"), t) or "En juego"
 
 
 def _event_key(ev, etype) -> str:
