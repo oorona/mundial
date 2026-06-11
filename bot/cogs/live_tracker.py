@@ -14,7 +14,6 @@ import logging
 import os
 import random
 import time
-import urllib.parse
 
 import discord
 from discord import app_commands
@@ -118,6 +117,7 @@ class LiveTracker(commands.Cog):
         self._threads: dict[tuple[int, str], int] = {}    # (guild_id, field) -> thread id; field = match id or "inaug"
         self._last_feed: dict[int, str] = {}
         self._seen_events: dict[int, set[str]] = {}   # match_id -> set of event keys (feed dedup)
+        self._recent_gifs: list[str] = []             # last gif URLs posted (no repeats)
         self.tick.start()
 
     def cog_unload(self):
@@ -259,31 +259,59 @@ class LiveTracker(commands.Cog):
     # configured to react to bot messages — the Tenor path below is the reliable one.
     GOAL_GIF_USER_ID = 1355258979789312100
 
+    # Giphy goal gifs — ported from staffai utils/native_tools.py. Giphy ranks
+    # deterministically (same query → same top result), so over-fetch a pool and
+    # pick at random, also skipping recently used gifs, to avoid repeats.
+    _GIPHY_RENDITIONS = ("downsized", "downsized_medium", "downsized_large", "fixed_width", "original")
+    _GIF_POOL = 25
+
+    @staticmethod
+    def _giphy_key() -> str | None:
+        # staffai pattern: docker secret first, env fallback.
+        try:
+            with open("/run/secrets/giphy_api_key") as f:
+                v = f.read().strip()
+            if v:
+                return v
+        except OSError:
+            pass
+        return (os.environ.get("GIPHY_API_KEY") or "").strip() or None
+
     async def _goal_gif(self, team: str) -> str | None:
-        """Fetch a goal-celebration gif URL from Tenor (random pick from top results).
-        Requires TENOR_API_KEY in the bot environment; returns None when unset or on
-        any API hiccup so the caller can fall back to pinging the gif bot."""
-        key = os.environ.get("TENOR_API_KEY")
+        """Fetch a goal-celebration gif URL from Giphy; returns None when the key is
+        missing or on any API hiccup so the caller can fall back to the gif-bot ping."""
+        key = self._giphy_key()
         if not key:
             return None
-        q = urllib.parse.quote(f"{team} gol celebration futbol")
-        url = (f"https://tenor.googleapis.com/v2/search?q={q}&key={key}"
-               f"&limit=15&media_filter=gif&random=true&contentfilter=medium")
+        # Vary the query too, not just the pick — more variety across goals.
+        q = random.choice((f"{team} gol", f"{team} goal celebration",
+                           "golazo celebracion", "goal celebration futbol"))
+        params = {"api_key": key, "q": q[:50], "limit": self._GIF_POOL, "lang": "es",
+                  "rating": "pg", "bundle": "messaging_non_clips"}
         try:
-            async with self.bot.session.get(url) as resp:
+            async with self.bot.session.get("https://api.giphy.com/v1/gifs/search", params=params) as resp:
                 if resp.status != 200:
-                    log.warning("live_tracker: tenor search failed (%s)", resp.status)
+                    log.warning("live_tracker: giphy search failed (%s)", resp.status)
                     return None
                 data = await resp.json()
         except Exception as e:
-            log.warning("live_tracker: tenor search error: %r", e)
+            log.warning("live_tracker: giphy search error: %r", e)
             return None
-        results = data.get("results") or []
-        if not results:
+        urls = []
+        for g in data.get("data") or []:
+            images = g.get("images") or {}
+            for r in self._GIPHY_RENDITIONS:
+                d = images.get(r) or {}
+                u = d.get("url") or d.get("webp")
+                if u:
+                    urls.append(u)
+                    break
+        if not urls:
             return None
-        r = random.choice(results)
-        # itemurl (tenor.com/view/...) auto-embeds in Discord; raw gif URL as backup.
-        return r.get("itemurl") or ((r.get("media_formats") or {}).get("gif") or {}).get("url")
+        fresh = [u for u in urls if u not in self._recent_gifs] or urls
+        pick = random.choice(fresh)
+        self._recent_gifs = (self._recent_gifs + [pick])[-30:]
+        return pick
 
     async def _announce_goals(self, settings_rows, goals: list[dict]):
         """Confirmed-goal pings: for each goal event seen for the FIRST time this tick,
