@@ -601,19 +601,29 @@ class LiveTracker(commands.Cog):
             r = ai.get(m["id"])
             if not r:
                 continue
+            committed = False
             if auto_commit and r.get("finished") and float(r.get("confidence", 0)) >= threshold:
-                await s.execute(
+                # Time floor: a 90'+HT match physically can't end before kickoff+105';
+                # the AI sometimes calls it during stoppage time, which kills the
+                # stream early (finished=true leaves the polling window). Hold the
+                # commit until kickoff+115' — worst case the final lands a tick late.
+                res = await s.execute(
                     text("""
                         UPDATE matches
                         SET home_score = :hs, away_score = :as_, finished = true,
                             home_pens = :hp, away_pens = :ap, time_elapsed = 'FT'
                         WHERE id = :id AND finished = false
+                          AND kickoff_at <= now() - interval '115 minutes'
                     """),
                     {"hs": int(r["home_score"]), "as_": int(r["away_score"]),
                      "hp": r.get("home_pens"), "ap": r.get("away_pens"), "id": m["id"]},
                 )
-            else:
-                te = str(r.get("minute") or r.get("status") or "")[:20]
+                committed = bool(res.rowcount)
+                if not committed:
+                    log.info("live_tracker: AI reported final for match %s before 115' — holding commit", m["id"])
+            if not committed:
+                # Held finals show as deep stoppage, not "Final" — the stream is still on.
+                te = str(r.get("minute") or ("90'+" if r.get("finished") else r.get("status")) or "")[:20]
                 hs, as_ = r.get("home_score"), r.get("away_score")
                 if (hs is not None and as_ is not None
                         and str(r.get("status") or "").lower() != "notstarted"
