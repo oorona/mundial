@@ -395,8 +395,19 @@ class LiveTracker(commands.Cog):
                     return entry
         return None
 
+    # Klipy pads weak matches with loosely related content (a "gol de South Korea"
+    # pool included kittens and Korea war footage). Only ever pick a gif whose
+    # TITLE says it's football: goal/celebration words in es/en/pt + Korean 골.
+    _FOOTBALL_WORDS = ("goal", "gol", "golo", "soccer", "futbol", "fútbol", "football",
+                       "celebr", "mundial", "world cup", "골")
+
+    @classmethod
+    def _footballish(cls, title: str) -> bool:
+        t = (title or "").lower()
+        return any(w in t for w in cls._FOOTBALL_WORDS)
+
     async def _klipy_search(self, key: str, query: str) -> list[str]:
-        """Klipy gif search → list of displayable URLs ([] on any hiccup)."""
+        """Klipy gif search → URLs of FOOTBALL-titled results ([] on any hiccup)."""
         params = {"q": query, "page": 1, "per_page": self._GIF_POOL, "content_filter": "low"}
         try:
             async with self.bot.session.get(
@@ -413,7 +424,9 @@ class LiveTracker(commands.Cog):
             log.warning("live_tracker: klipy returned unsuccessful result")
             return []
         items = (data.get("data") or {}).get("data") or []
-        return [u for u in (self._best_klipy_url(i) for i in items if isinstance(i, dict)) if u]
+        return [u for u in (self._best_klipy_url(i) for i in items
+                            if isinstance(i, dict) and self._footballish(i.get("title")))
+                if u]
 
     async def _goal_gif(self, team: str) -> str | None:
         """Fetch a goal-celebration gif from Klipy, themed on the SCORING TEAM —
