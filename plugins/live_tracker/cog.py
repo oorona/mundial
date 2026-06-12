@@ -76,7 +76,8 @@ SCORE_SCHEMA_DOC = {
 
 _INWINDOW_SQL = text("""
     SELECT m.id AS id, m.type AS round_code,
-           ht.name_en AS home_name, at.name_en AS away_name
+           ht.name_en AS home_name, at.name_en AS away_name,
+           m.home_score AS hs, m.away_score AS as_, m.time_elapsed AS te
     FROM matches m
     JOIN teams ht ON ht.id = m.home_team_id
     JOIN teams at ON at.id = m.away_team_id
@@ -257,12 +258,14 @@ class LiveTracker(commands.Cog):
                                         "away": m["away"],
                                         "text": f"🏟️ ¡Comienza el partido! {m['home']} vs {m['away']}",
                                         "ts": int(time.time())})
+                await self._ctx_add(m["id"], "Comenzó el partido")
             if not m["finished"] and state_raw in ("halftime", "ht", "descanso") \
                     and await self._first_time(m["id"], "halftime"):
                 await self._push_event({"type": "halftime", "match_id": m["id"], "home": m["home"],
                                         "away": m["away"],
                                         "text": f"⏸️ Descanso: {m['home']} {score} {m['away']}",
                                         "ts": int(time.time())})
+                await self._ctx_add(m["id"], f"Descanso al {score}")
 
             # Granular events (goals/cards/subs/…): announce each only once. The
             # dedup context is PERSISTED in Redis (live:seen:{match}) so restarts
@@ -300,6 +303,7 @@ class LiveTracker(commands.Cog):
                 await self._push_event({"type": etype, "match_id": m["id"], "home": m["home"],
                                         "away": m["away"], "player": player, "minute": minute,
                                         "text": text, "ts": int(time.time())})
+                await self._ctx_add(m["id"], text)
 
             # Score line ONLY when the score actually changes — minute/status updates
             # are noise (a wobbling status used to spam the feed every tick). The
@@ -310,6 +314,7 @@ class LiveTracker(commands.Cog):
                                             "away": m["away"], "home_score": m["hs"], "away_score": m["as_"],
                                             "text": f"🏁 FINAL — {m['home']} {score} {m['away']}",
                                             "ts": int(time.time())})
+                    await self._ctx_add(m["id"], f"FINAL {score}")
             elif m["hs"] is not None and await self._score_changed(m["id"], m["hs"], m["as_"]):
                 mn = str(m["te"] or "").strip()
                 mn = mn if re.fullmatch(r"\d{1,3}(\+\d{1,2})?'?", mn) else ""
@@ -674,6 +679,7 @@ class LiveTracker(commands.Cog):
                 "(goles con goleador y minuto, tarjetas, cambios, penales, VAR)."
             )
             user = tmpl.format(home=m["home_name"], away=m["away_name"])
+            user += await self._match_context(m)
             grounded = await provider.generate_response(
                 [LLMMessage(role="user", content=user)],
                 system_prompt=sys,
@@ -696,6 +702,43 @@ class LiveTracker(commands.Cog):
         except Exception:
             return None
         return None
+
+    async def _match_context(self, m: dict) -> str:
+        """Known-state block injected into the AI poll so each tick builds on the
+        previous ones instead of rediscovering the match from scratch: the score we
+        hold, the current state, and every event already reported. The model uses it
+        to report only what is NEW and to keep names/minutes consistent (which also
+        makes the dedup keys stable)."""
+        known = f"{m['home_name']} {m.get('hs') or 0}–{m.get('as_') or 0} {m['away_name']}"
+        te = str(m.get("te") or "").strip()
+        if te:
+            known += f" · estado: {_state_es(te)}"
+        lines = []
+        if self.redis:
+            try:
+                lines = [str(x) for x in await self.redis.lrange(f"live:ctx:{m['id']}", 0, 29)]
+            except Exception:
+                lines = []
+        ctx = ("\n\nCONTEXTO DE TICKS ANTERIORES (ya reportado a los usuarios):\n"
+               f"- Marcador conocido: {known}\n")
+        if lines:
+            ctx += "\n".join(f"- {l}" for l in lines) + "\n"
+        ctx += ("Usa este contexto: reporta el estado actual completo, pero presta especial "
+                "atención a lo NUEVO desde entonces. Mantén nombres y minutos consistentes "
+                "con lo ya reportado. Si el marcador conocido ya refleja un gol, ese gol NO es nuevo. "
+                "Solo contradice el contexto si las fuentes lo corrigen claramente.")
+        return ctx
+
+    async def _ctx_add(self, match_id: int, line: str):
+        """Append a reported event to the match's context memory (capped, 6h TTL)."""
+        if not self.redis:
+            return
+        try:
+            await self.redis.rpush(f"live:ctx:{match_id}", line)
+            await self.redis.ltrim(f"live:ctx:{match_id}", -30, -1)
+            await self.redis.expire(f"live:ctx:{match_id}", 21600)
+        except Exception:
+            pass
 
     async def _commit_config(self, s) -> tuple[bool, float]:
         """Global result auto-commit config (set by Developers on the Live Tracker card,
