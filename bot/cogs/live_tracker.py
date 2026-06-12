@@ -241,34 +241,28 @@ class LiveTracker(commands.Cog):
 
     async def _publish_live_events(self, snapshot, ai: dict[int, dict] | None = None) -> list[dict]:
         """Streams feed updates; returns the NEW goal events seen this tick (already
-        deduped via _seen_events) so the tick can announce them to goal channels."""
+        deduped via _seen_events) so the tick can announce them to goal channels.
+
+        The feed is a curated narrative, not a status log: one kickoff marker, one
+        halftime marker, events (goals capped at the scoreboard), a score line ONLY
+        when the score changes, and one final marker pushed LAST so it tops the feed."""
         ai = ai or {}
         new_goals: list[dict] = []
         for m in snapshot:
             score = f"{m['hs']}–{m['as_']}" if m["hs"] is not None else "vs"
-            # Clear bookends: an explicit kickoff marker once the game is underway,
-            # and a single final marker — Redis-deduped, so once each per match.
-            underway = str(m["te"] or "").strip().lower() not in ("", "notstarted", "not_started")
+            state_raw = str(m["te"] or "").strip().lower().replace(" ", "_")
+            underway = state_raw not in ("", "notstarted", "not_started")
             if not m["finished"] and underway and await self._first_time(m["id"], "kickoff"):
                 await self._push_event({"type": "kickoff", "match_id": m["id"], "home": m["home"],
                                         "away": m["away"],
                                         "text": f"🏟️ ¡Comienza el partido! {m['home']} vs {m['away']}",
                                         "ts": int(time.time())})
-            if m["finished"]:
-                if await self._first_time(m["id"], "final"):
-                    await self._push_event({"type": "final", "match_id": m["id"], "home": m["home"],
-                                            "away": m["away"], "home_score": m["hs"], "away_score": m["as_"],
-                                            "text": f"🏁 Final del partido: {m['home']} {score} {m['away']}",
-                                            "ts": int(time.time())})
-                # No more score lines after the final marker.
-            else:
-                state = _state_es(m["te"])
-                line = f"{m['home']} {score} {m['away']} · {state}"
-                if self._last_feed.get(m["id"]) != line:
-                    self._last_feed[m["id"]] = line
-                    await self._push_event({"type": "live", "match_id": m["id"], "home": m["home"], "away": m["away"],
-                                            "home_score": m["hs"], "away_score": m["as_"], "state": state,
-                                            "text": line, "ts": int(time.time())})
+            if not m["finished"] and state_raw in ("halftime", "ht", "descanso") \
+                    and await self._first_time(m["id"], "halftime"):
+                await self._push_event({"type": "halftime", "match_id": m["id"], "home": m["home"],
+                                        "away": m["away"],
+                                        "text": f"⏸️ Descanso: {m['home']} {score} {m['away']}",
+                                        "ts": int(time.time())})
 
             # Granular events (goals/cards/subs/…): announce each only once. The
             # dedup context is PERSISTED in Redis (live:seen:{match}) so restarts
@@ -295,16 +289,54 @@ class LiveTracker(commands.Cog):
                     seen.add(key)
                     continue
                 seen.add(key)
+                if etype in ("goal", "own_goal", "penalty_goal"):
+                    # Never report more goals than the scoreboard holds — the AI
+                    # re-words old goals (new minute/detail) and they'd slip past
+                    # key dedup; the budget blocks them from feed AND channel.
+                    if not await self._goal_budget_ok(m["id"], r):
+                        continue
+                    new_goals.append({"home": m["home"], "away": m["away"], "ev": ev, "etype": etype})
                 text = _fmt_event(ev, etype, m["home"], m["away"])
                 await self._push_event({"type": etype, "match_id": m["id"], "home": m["home"],
                                         "away": m["away"], "player": player, "minute": minute,
                                         "text": text, "ts": int(time.time())})
-                if etype in ("goal", "own_goal", "penalty_goal"):
-                    # Extra guard: never announce more goals than the scoreboard
-                    # holds — a re-worded old goal slips past key dedup but not this.
-                    if await self._goal_budget_ok(m["id"], r):
-                        new_goals.append({"home": m["home"], "away": m["away"], "ev": ev, "etype": etype})
+
+            # Score line ONLY when the score actually changes — minute/status updates
+            # are noise (a wobbling status used to spam the feed every tick). The
+            # final marker is pushed LAST so it lands newest and tops the feed.
+            if m["finished"]:
+                if await self._first_time(m["id"], "final"):
+                    await self._push_event({"type": "final", "match_id": m["id"], "home": m["home"],
+                                            "away": m["away"], "home_score": m["hs"], "away_score": m["as_"],
+                                            "text": f"🏁 FINAL — {m['home']} {score} {m['away']}",
+                                            "ts": int(time.time())})
+            elif m["hs"] is not None and await self._score_changed(m["id"], m["hs"], m["as_"]):
+                mn = str(m["te"] or "").strip()
+                mn = mn if re.fullmatch(r"\d{1,3}(\+\d{1,2})?'?", mn) else ""
+                line = f"{m['home']} {score} {m['away']}" + (f" · {mn}" if mn else "")
+                await self._push_event({"type": "live", "match_id": m["id"], "home": m["home"], "away": m["away"],
+                                        "home_score": m["hs"], "away_score": m["as_"],
+                                        "text": line, "ts": int(time.time())})
         return new_goals
+
+    async def _score_changed(self, match_id: int, hs, as_) -> bool:
+        """True only when the score differs from the last one we pushed (Redis-backed
+        so restarts don't re-push). The initial 0–0 is not a change — the kickoff
+        marker covers the start."""
+        cur = f"{hs}-{as_}"
+        if self._last_feed.get(match_id) == cur:
+            return False
+        self._last_feed[match_id] = cur
+        prev = None
+        if self.redis:
+            try:
+                prev = await self.redis.get(f"live:lastscore:{match_id}")
+                await self.redis.set(f"live:lastscore:{match_id}", cur, ex=21600)
+            except Exception:
+                prev = None
+        if prev is not None and str(prev) == cur:
+            return False
+        return not (prev is None and cur == "0-0")
 
     async def _final_confirmed(self, match_id: int) -> bool:
         """Debounce the AI's 'finished' flag: True only on the SECOND consecutive
@@ -715,8 +747,15 @@ class LiveTracker(commands.Cog):
             else:
                 await self._clear_final_pending(m["id"])
             if not committed:
-                # Held finals show as deep stoppage, not "Final" — the stream is still on.
-                te = str(r.get("minute") or ("90'+" if r.get("finished") else r.get("status")) or "")[:20]
+                # Write time_elapsed only when there is something REAL to say: a
+                # minute, or a status while the game hasn't started. A held/early
+                # "finished" must NOT touch it (it used to paint "90'+" pre-game).
+                if r.get("minute"):
+                    te = str(r.get("minute"))[:20]
+                elif not r.get("finished"):
+                    te = str(r.get("status") or "")[:20]
+                else:
+                    te = None  # held final: keep whatever minute is already stored
                 hs, as_ = r.get("home_score"), r.get("away_score")
                 if (hs is not None and as_ is not None
                         and str(r.get("status") or "").lower() != "notstarted"
@@ -729,12 +768,12 @@ class LiveTracker(commands.Cog):
                             UPDATE matches
                             SET home_score = GREATEST(COALESCE(home_score, 0), :hs),
                                 away_score = GREATEST(COALESCE(away_score, 0), :as_),
-                                time_elapsed = :te
+                                time_elapsed = COALESCE(:te, time_elapsed)
                             WHERE id = :id AND finished = false
                         """),
                         {"hs": int(hs), "as_": int(as_), "te": te, "id": m["id"]},
                     )
-                else:
+                elif te:
                     await s.execute(
                         text("UPDATE matches SET time_elapsed = :te WHERE id = :id AND finished = false"),
                         {"te": te, "id": m["id"]},
@@ -1137,7 +1176,8 @@ _EVENT_LABEL_ES = {
     "var": "Revisión del VAR",
 }
 
-_UNKNOWN_WORDS = ("desconocido", "unknown", "n/a", "na", "unknown desconocido", "tbd")
+_UNKNOWN_WORDS = ("desconocido", "unknown", "n/a", "na", "unknown desconocido", "tbd",
+                  "none", "null", "n/d", "nd", "-", "—", "no especificado", "se desconoce")
 
 
 def _known(value) -> str:
