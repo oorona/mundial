@@ -343,15 +343,18 @@ class LiveTracker(commands.Cog):
             return False
         return not (prev is None and cur == "0-0")
 
-    async def _final_confirmed(self, match_id: int) -> bool:
-        """Debounce the AI's 'finished' flag: True only on the SECOND consecutive
-        poll that reports the game over (marker survives restarts via Redis)."""
+    async def _final_confirmed(self, match_id: int, hs, as_) -> bool:
+        """Debounce AND verify the final: True only when TWO consecutive polls both
+        report finished with the SAME score. A flaky or hallucinated final score
+        (the cause of wrong committed results) won't repeat identically, so it never
+        commits. The marker stores the score and survives restarts via Redis."""
+        cur = f"{int(hs)}-{int(as_)}"
         if not self.redis:
             return True
         try:
-            pending = await self.redis.get(f"live:final_pending:{match_id}")
-            await self.redis.set(f"live:final_pending:{match_id}", "1", ex=900)
-            return bool(pending)
+            prev = await self.redis.get(f"live:final_pending:{match_id}")
+            await self.redis.set(f"live:final_pending:{match_id}", cur, ex=1800)
+            return prev is not None and str(prev) == cur
         except Exception:
             return True
 
@@ -766,13 +769,14 @@ class LiveTracker(commands.Cog):
                 continue
             committed = False
             if auto_commit and r.get("finished") and float(r.get("confidence", 0)) >= threshold:
-                # Two guards against cutting the stream early, while still ending it
-                # promptly once the game is really over (no token-burning overtime):
-                # 1. debounce — TWO consecutive polls must agree it's finished (one
-                #    bad search result can't end the stream);
+                # Three guards against ending the stream early or with a WRONG score,
+                # while still ending it promptly once the game is really over:
+                # 1. debounce + score match — TWO consecutive polls must agree it's
+                #    finished WITH THE SAME score (a flaky/hallucinated final never
+                #    repeats identically, so it can't commit);
                 # 2. physical floor — 90'+HT can't end before kickoff+105'.
                 # Once both pass, finished=true commits and polling stops entirely.
-                if await self._final_confirmed(m["id"]):
+                if await self._final_confirmed(m["id"], r["home_score"], r["away_score"]):
                     res = await s.execute(
                         text("""
                             UPDATE matches

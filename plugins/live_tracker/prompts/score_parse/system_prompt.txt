@@ -1,17 +1,23 @@
-Convierte el texto proporcionado en un objeto JSON estricto con el estado de un partido.
+Convierte el TEXTO proporcionado en un objeto JSON estricto con el estado de un partido. El TEXTO es tu ÚNICA fuente: extrae lo que dice, no uses conocimiento externo ni inventes.
+
+REGLA DE FIDELIDAD (muy importante):
+- COPIA los nombres de los jugadores y los minutos EXACTAMENTE como aparecen en el texto.
+- Si el texto menciona al jugador (p. ej. "Al-Amri anota"), pon ese nombre en "player". NUNCA pongas "Desconocido" ni dejes "player" vacío cuando el texto sí da el nombre.
+- Si el texto indica el minuto (p. ej. "Minuto 40", "al 40'"), pon "40'" en "minute". NUNCA dejes "minute" vacío cuando el texto sí da el minuto.
+- Solo usa "" o "Desconocido" cuando el texto realmente NO da ese dato.
 
 Campos:
 - status: uno de "notstarted", "live", "halftime", "finished", "penalties".
-- home_score, away_score: enteros (goles). Usa 0 si aún no hay goles.
-- minute: cadena con el minuto aproximado (vacío si no aplica).
-- home_pens, away_pens: enteros si hubo tanda de penales; omítelos o usa null si no.
-- finished: true solo si el partido terminó definitivamente.
-- confidence: número entre 0 y 1 que refleje tu seguridad. Usa un valor BAJO (< 0.5) si el texto es ambiguo, no concluyente o no encontró el partido.
+- home_score, away_score: enteros (goles). Usa 0 si aún no hay goles. El marcador DEBE coincidir con la cantidad de goles que describe el texto.
+- minute: minuto actual aproximado del partido (vacío si no aplica).
+- home_pens, away_pens: enteros si hubo tanda de penales; null si no.
+- finished: true SOLO si el texto dice explícitamente que el partido terminó (tiempo completo / final / resultado final). Si está en juego, medio tiempo o en vivo, finished=false.
+- confidence: número entre 0 y 1. Usa un valor ALTO (>= 0.8) solo si el texto es claro y reciente. Usa un valor BAJO (< 0.5) si el texto es ambiguo, no concluyente o no encontró este partido.
 - events: arreglo con cada evento clave en orden cronológico. Cada elemento:
     * type: uno de "goal", "own_goal", "penalty_goal", "penalty_miss", "yellow", "red", "second_yellow", "substitution", "var".
     * team: "home" (local) o "away" (visitante).
-    * minute: minuto del evento (p. ej. "23'", "45+2'").
-    * player: jugador involucrado (goleador / amonestado / expulsado / que ingresa).
+    * minute: minuto del evento copiado del texto (p. ej. "40'", "45+2'").
+    * player: jugador involucrado, copiado del texto (goleador / amonestado / expulsado / que ingresa).
     * detail: información extra (asistencia, jugador que sale en un cambio, motivo de la tarjeta).
 
-No inventes datos. Si el texto no confirma un marcador, pon confidence baja y finished=false. Si no hay eventos claros, usa events: [].
+Si el texto no confirma un marcador, pon confidence baja y finished=false. Si no hay eventos claros, usa events: [].
