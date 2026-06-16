@@ -85,11 +85,13 @@ _INWINDOW_SQL = text("""
       AND m.kickoff_at IS NOT NULL
       AND m.kickoff_at <= now() + interval '5 minutes'
       -- Stop polling a dead game: group matches can't go to extra time, so they
-      -- can't run past ~kickoff+2h15m; only knockouts need the 3h tail (ET + pens).
+      -- can't run past ~kickoff+2h30m; only knockouts need the 3h tail (ET + pens).
       -- A committed final already leaves the window earlier; this just caps the
       -- worst case (a final that never commits) so it can't burn the full 3h.
+      -- The cap MUST stay well above the commit floor below (120') so a legit final
+      -- has several ticks to land and confirm before the window closes.
       AND m.kickoff_at >= now() - (CASE WHEN m.type = 'group'
-                                        THEN interval '135 minutes'
+                                        THEN interval '150 minutes'
                                         ELSE interval '3 hours' END)
 """)
 
@@ -780,7 +782,14 @@ class LiveTracker(commands.Cog):
                 # 1. debounce + score match — TWO consecutive polls must agree it's
                 #    finished WITH THE SAME score (a flaky/hallucinated final never
                 #    repeats identically, so it can't commit);
-                # 2. physical floor — 90'+HT can't end before kickoff+105'.
+                # 2. physical floor — a match can't truly end before ~kickoff+120'.
+                #    Two 45' halves + a 15' break already run to ~105'; second-half
+                #    stoppage routinely pushes the final whistle (and its late goals —
+                #    the 90'+ winners) past that. 105' let finals commit DURING 2nd-half
+                #    stoppage and lock a pre-stoppage score (e.g. 2-0 before two 90'+
+                #    goals made it 3-1). 120' covers full stoppage so those goals land
+                #    before we ever commit. The grounded AI reports finished=false while
+                #    a knockout is in ET, so this flat floor is safe there too.
                 # Once both pass, finished=true commits and polling stops entirely.
                 if await self._final_confirmed(m["id"], r["home_score"], r["away_score"]):
                     res = await s.execute(
@@ -789,14 +798,14 @@ class LiveTracker(commands.Cog):
                             SET home_score = :hs, away_score = :as_, finished = true,
                                 home_pens = :hp, away_pens = :ap, time_elapsed = 'FT'
                             WHERE id = :id AND finished = false
-                              AND kickoff_at <= now() - interval '105 minutes'
+                              AND kickoff_at <= now() - interval '120 minutes'
                         """),
                         {"hs": int(r["home_score"]), "as_": int(r["away_score"]),
                          "hp": r.get("home_pens"), "ap": r.get("away_pens"), "id": m["id"]},
                     )
                     committed = bool(res.rowcount)
                     if not committed:
-                        log.info("live_tracker: AI reported final for match %s before 105' — holding commit", m["id"])
+                        log.info("live_tracker: AI reported final for match %s before 120' — holding commit", m["id"])
             else:
                 await self._clear_final_pending(m["id"])
             if not committed:
