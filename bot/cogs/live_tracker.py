@@ -335,11 +335,11 @@ class LiveTracker(commands.Cog):
         prev = None
         if self.redis:
             try:
-                prev = await self.redis.get(f"live:lastscore:{match_id}")
+                prev = _dec(await self.redis.get(f"live:lastscore:{match_id}"))
                 await self.redis.set(f"live:lastscore:{match_id}", cur, ex=21600)
             except Exception:
                 prev = None
-        if prev is not None and str(prev) == cur:
+        if prev is not None and prev == cur:
             return False
         return not (prev is None and cur == "0-0")
 
@@ -352,9 +352,9 @@ class LiveTracker(commands.Cog):
         if not self.redis:
             return True
         try:
-            prev = await self.redis.get(f"live:final_pending:{match_id}")
+            prev = _dec(await self.redis.get(f"live:final_pending:{match_id}"))
             await self.redis.set(f"live:final_pending:{match_id}", cur, ex=1800)
-            return prev is not None and str(prev) == cur
+            return prev is not None and prev == cur
         except Exception:
             return True
 
@@ -719,7 +719,7 @@ class LiveTracker(commands.Cog):
         lines = []
         if self.redis:
             try:
-                lines = [str(x) for x in await self.redis.lrange(f"live:ctx:{m['id']}", 0, 29)]
+                lines = [_dec(x) for x in await self.redis.lrange(f"live:ctx:{m['id']}", 0, 29)]
             except Exception:
                 lines = []
         ctx = ("\n\nCONTEXTO DE TICKS ANTERIORES (ya reportado a los usuarios):\n"
@@ -1179,6 +1179,12 @@ _STATE_ES = {
     "halftime": "Descanso", "ht": "Descanso",
     "penalties": "Penales", "finished": "Final", "ft": "Final", "fulltime": "Final",
 }
+
+
+def _dec(v):
+    """Decode a Redis reply to str — the bot's client returns bytes (decode_responses
+    is off), so string comparisons on raw replies (b'2-2' == '2-2') silently fail."""
+    return v.decode() if isinstance(v, (bytes, bytearray)) else v
 
 
 def _state_es(te) -> str:
