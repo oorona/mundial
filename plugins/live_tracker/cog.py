@@ -77,7 +77,8 @@ SCORE_SCHEMA_DOC = {
 _INWINDOW_SQL = text("""
     SELECT m.id AS id, m.type AS round_code,
            ht.name_en AS home_name, at.name_en AS away_name,
-           m.home_score AS hs, m.away_score AS as_, m.time_elapsed AS te
+           m.home_score AS hs, m.away_score AS as_, m.time_elapsed AS te,
+           round(extract(epoch FROM (now() - m.kickoff_at)) / 60)::int AS mins_since_ko
     FROM matches m
     JOIN teams ht ON ht.id = m.home_team_id
     JOIN teams at ON at.id = m.away_team_id
@@ -734,10 +735,30 @@ class LiveTracker(commands.Cog):
                f"- Marcador conocido: {known}\n")
         if lines:
             ctx += "\n".join(f"- {l}" for l in lines) + "\n"
-        ctx += ("Usa este contexto: reporta el estado actual completo, pero presta especial "
-                "atención a lo NUEVO desde entonces. Mantén nombres y minutos consistentes "
-                "con lo ya reportado. Si el marcador conocido ya refleja un gol, ese gol NO es nuevo. "
-                "Solo contradice el contexto si las fuentes lo corrigen claramente.")
+        # Minute-aware steering. The grounded search's dominant failure mode is
+        # settling on a well-indexed HALF-TIME RECAP and re-reporting the old score,
+        # so the live score never advances past the break. Tell the model roughly how
+        # far the match is (from wall-clock since kickoff) and force it to hunt for any
+        # goal AFTER the last minute we already know — that's what reliably surfaces
+        # second-half / stoppage goals instead of stale recaps.
+        mins = m.get("mins_since_ko")
+        last_min = 0
+        for l in lines:
+            for mm in re.findall(r"(\d{1,3})(?=['′+])", l):
+                last_min = max(last_min, int(mm))
+        if isinstance(mins, (int, float)):
+            wall = int(mins)
+            est = max(0, wall - 15)  # discount the ~15' half-time break
+            ctx += (f"\nRELOJ: han pasado ~{wall} min desde el inicio (incluye el descanso de ~15'), "
+                    f"así que el juego va por ~minuto {est} o está por terminar. ")
+        ctx += (f"BUSCA ACTIVAMENTE en fuentes de minuto a minuto cualquier GOL o evento "
+                f"POSTERIOR al minuto {last_min} (segundo tiempo y tiempo añadido); el marcador "
+                f"PUDO cambiar desde el último tick. NO te quedes con resúmenes del medio tiempo. "
+                f"Reporta el estado actual completo y presta especial atención a lo NUEVO. "
+                f"Mantén nombres y minutos consistentes con lo ya reportado; un gol ya reflejado en "
+                f"el marcador conocido NO es nuevo. NO declares el partido terminado a menos que las "
+                f"fuentes confirmen el pitido final (FT). Solo contradice el contexto si las fuentes "
+                f"lo corrigen claramente.")
         return ctx
 
     async def _ctx_add(self, match_id: int, line: str):
