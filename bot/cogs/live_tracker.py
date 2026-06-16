@@ -84,7 +84,13 @@ _INWINDOW_SQL = text("""
     WHERE m.finished = false
       AND m.kickoff_at IS NOT NULL
       AND m.kickoff_at <= now() + interval '5 minutes'
-      AND m.kickoff_at >= now() - interval '3 hours'
+      -- Stop polling a dead game: group matches can't go to extra time, so they
+      -- can't run past ~kickoff+2h15m; only knockouts need the 3h tail (ET + pens).
+      -- A committed final already leaves the window earlier; this just caps the
+      -- worst case (a final that never commits) so it can't burn the full 3h.
+      AND m.kickoff_at >= now() - (CASE WHEN m.type = 'group'
+                                        THEN interval '135 minutes'
+                                        ELSE interval '3 hours' END)
 """)
 
 
