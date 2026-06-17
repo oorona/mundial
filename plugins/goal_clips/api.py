@@ -16,9 +16,10 @@ routes are audit-exempt and no AuditLog is written. Auth is a dedicated upload k
 import json
 import os
 import secrets as _secrets
+import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -139,6 +140,28 @@ async def ingest_clip(
         pass
 
     return {"id": clip.id, "duplicate": False}
+
+
+@router.post("/debug-log")
+async def debug_log(
+    payload: dict = Body(...),
+    x_upload_key: str | None = Header(None, alias="X-Upload-Key"),
+    redis: Redis = Depends(get_redis),
+):
+    """Receive an activity-log entry from the browser extension so its decisions
+    (scan / classify / download / upload / skip / error / heartbeat) are visible
+    server-side, not just in the popup on the user's PC. Best-effort; kept in a capped
+    Redis list. Audit-exempt (global plugin)."""
+    _require_key(x_upload_key)
+    try:
+        entry = dict(payload) if isinstance(payload, dict) else {"detail": str(payload)}
+        entry["server_ts"] = int(time.time())
+        await redis.lpush("goal_clips:extlog", json.dumps(entry)[:2000])
+        await redis.ltrim("goal_clips:extlog", 0, 299)
+        await redis.expire("goal_clips:extlog", 6 * 3600)
+    except Exception:
+        pass
+    return {"ok": True}
 
 
 @router.get("/{clip_id}/video")

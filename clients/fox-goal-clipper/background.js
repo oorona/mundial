@@ -38,6 +38,20 @@ async function logEvent(tweetId, stage, ok, detail) {
     while (log.length > LOG_CAP) log.pop();
     await chrome.storage.local.set({ log });
   } catch (_) {}
+  mirrorToServer(entry); // also send to the server so the activity is visible remotely
+}
+
+// Best-effort mirror of a log entry to the server's debug-log endpoint.
+async function mirrorToServer(entry) {
+  try {
+    const cfg = await chrome.storage.local.get(["serverUrl", "uploadKey"]);
+    if (!cfg.serverUrl || !cfg.uploadKey) return;
+    fetch(cfg.serverUrl.replace(/\/+$/, "") + "/api/v1/goal-clips/debug-log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Upload-Key": cfg.uploadKey },
+      body: JSON.stringify(entry),
+    }).catch(() => {});
+  } catch (_) {}
 }
 
 // ── Config + dedup ──────────────────────────────────────────────────────────────
