@@ -12,7 +12,6 @@ up automatically because recompute/rescore run every tick over all finished matc
 import json
 import logging
 import os
-import random
 import re
 import time
 import unicodedata
@@ -140,6 +139,10 @@ class LiveTracker(commands.Cog):
         ],
     }
 
+    # How long a stream-confirmed goal waits for its Fox clip before being announced
+    # text-only (so a goal is never left unannounced when Fox posts no clip).
+    CLIP_TIMEOUT = 210
+
     def __init__(self, bot):
         self.bot = bot
         self.db = bot.services.db
@@ -150,11 +153,12 @@ class LiveTracker(commands.Cog):
         self._threads: dict[tuple[int, str], int] = {}    # (guild_id, field) -> thread id; field = match id or "inaug"
         self._last_feed: dict[int, str] = {}
         self._seen_events: dict[int, set[str]] = {}   # match_id -> set of event keys (feed dedup)
-        self._recent_gifs: list[str] = []             # last gif URLs posted (no repeats)
         self.tick.start()
+        self._clip_pump.start()
 
     def cog_unload(self):
         self.tick.cancel()
+        self._clip_pump.cancel()
 
     @tasks.loop(seconds=300)
     async def tick(self):
@@ -180,7 +184,10 @@ class LiveTracker(commands.Cog):
                 await s.commit()
             await self._broadcast(settings_rows, snapshot, ai)
             new_goals = await self._publish_live_events(snapshot, ai)
-            await self._announce_goals(settings_rows, new_goals)
+            # Goals are no longer announced inline with a gif. Each confirmed goal is
+            # queued; the fast _clip_pump loop posts it once its Fox clip arrives (or
+            # text-only after CLIP_TIMEOUT). This is what swaps the gif for a real clip.
+            await self._enqueue_pending_goals(new_goals)
         else:
             # ── NEWS mode (every 8h when nothing is live): AI news about the next/
             # inauguration match → channel + app feed. Confirms the AI pipeline.
@@ -335,7 +342,8 @@ class LiveTracker(commands.Cog):
                     # key dedup; the budget blocks them from feed AND channel.
                     if not await self._goal_budget_ok(m["id"], r):
                         continue
-                    new_goals.append({"home": m["home"], "away": m["away"], "ev": ev, "etype": etype})
+                    new_goals.append({"match_id": m["id"], "home": m["home"], "away": m["away"],
+                                      "ev": ev, "etype": etype, "hs": m["hs"], "as_": m["as_"]})
                 text = _fmt_event(ev, etype, m["home"], m["away"])
                 await self._push_event({"type": etype, "match_id": m["id"], "home": m["home"],
                                         "away": m["away"], "player": player, "minute": minute,
@@ -432,107 +440,210 @@ class LiveTracker(commands.Cog):
         except Exception:
             return True
 
-    # Klipy goal gifs — ported from staffai utils/native_tools.py (Klipy is that
-    # bot's primary gif provider). Gif providers rank deterministically (same
-    # query → same top result), so over-fetch a pool and pick at random, also
-    # skipping recently used gifs, to avoid repeats.
-    # API: GET https://api.klipy.com/api/v1/{app_key}/gifs/search — auth via key
-    # in the URL path; response {result, data: {data: [items]}}; each item has
-    # file{hd|md|sm|xs}{gif|mp4|webp}{url}. Prefer large + gif (Discord-friendly).
-    _KLIPY_DIMS = ("hd", "md", "sm", "xs")
-    _KLIPY_FORMATS = ("gif", "mp4", "webp")
-    _GIF_POOL = 25
+    # ── Goal clips (Fox browser extension) ───────────────────────────────────────
+    # Goals are no longer announced inline with a Klipy gif. Each confirmed goal is
+    # queued in Redis (live:pending_goal:{match}); the fast _clip_pump loop pairs it
+    # with a Fox goal clip uploaded by the browser extension (goal_clips plugin →
+    # Redis goal_clips:incoming) and posts the CLIP instead of a gif. If no clip
+    # arrives within CLIP_TIMEOUT, the goal is announced text-only so none is missed.
 
-    @staticmethod
-    def _klipy_key() -> str | None:
-        # staffai pattern: docker secret first, env fallback.
-        try:
-            with open("/run/secrets/klipy_api_key") as f:
-                v = f.read().strip()
-            if v:
-                return v
-        except OSError:
-            pass
-        return (os.environ.get("KLIPY_API_KEY") or "").strip() or None
-
-    @classmethod
-    def _best_klipy_url(cls, item: dict) -> str | None:
-        file = item.get("file") or {}
-        if not isinstance(file, dict):
-            return None
-        for dim in cls._KLIPY_DIMS:
-            bucket = file.get(dim)
-            if not isinstance(bucket, dict):
-                continue
-            for fmt in cls._KLIPY_FORMATS:
-                entry = bucket.get(fmt)
-                if isinstance(entry, dict) and entry.get("url"):
-                    return entry["url"]
-                if isinstance(entry, str) and entry:
-                    return entry
-        return None
-
-    # Klipy pads weak matches with loosely related content (a "gol de South Korea"
-    # pool included kittens and Korea war footage). Only ever pick a gif whose
-    # TITLE says it's football: goal/celebration words in es/en/pt + Korean 골.
-    _FOOTBALL_WORDS = ("goal", "gol", "golo", "soccer", "futbol", "fútbol", "football",
-                       "celebr", "mundial", "world cup", "골")
-
-    @classmethod
-    def _footballish(cls, title: str) -> bool:
-        t = (title or "").lower()
-        return any(w in t for w in cls._FOOTBALL_WORDS)
-
-    async def _klipy_search(self, key: str, query: str) -> list[str]:
-        """Klipy gif search → URLs of FOOTBALL-titled results ([] on any hiccup)."""
-        params = {"q": query, "page": 1, "per_page": self._GIF_POOL, "content_filter": "low"}
-        try:
-            async with self.bot.session.get(
-                f"https://api.klipy.com/api/v1/{key}/gifs/search", params=params
-            ) as resp:
-                if resp.status != 200:
-                    log.warning("live_tracker: klipy search failed (%s)", resp.status)
-                    return []
-                data = await resp.json()
-        except Exception as e:
-            log.warning("live_tracker: klipy search error: %r", e)
-            return []
-        if not data.get("result"):
-            log.warning("live_tracker: klipy returned unsuccessful result")
-            return []
-        items = (data.get("data") or {}).get("data") or []
-        return [u for u in (self._best_klipy_url(i) for i in items
-                            if isinstance(i, dict) and self._footballish(i.get("title")))
-                if u]
-
-    async def _goal_gif(self, team: str) -> str | None:
-        """Fetch a goal-celebration gif from Klipy, themed on the SCORING TEAM —
-        every query carries the team name; a generic football-goal search is only
-        the fallback when the team-specific search comes up empty. Returns None
-        when the key is missing or on any API hiccup."""
-        key = self._klipy_key()
-        if not key:
-            return None
-        # Vary the phrasing per goal (not just the pick) — more variety across goals.
-        q = random.choice((f"{team} gol celebracion", f"{team} goal celebration",
-                           f"gol de {team}", f"{team} futbol gol"))
-        urls = await self._klipy_search(key, q)
-        if not urls:
-            urls = await self._klipy_search(key, "goal celebration futbol")
-        if not urls:
-            return None
-        fresh = [u for u in urls if u not in self._recent_gifs] or urls
-        pick = random.choice(fresh)
-        self._recent_gifs = (self._recent_gifs + [pick])[-30:]
-        return pick
-
-    async def _announce_goals(self, settings_rows, goals: list[dict]):
-        """Confirmed-goal pings: for each goal event seen for the FIRST time this tick,
-        post '¡GOOOL de X contra Y!' to the guild's goal channel (lt_goal_channel_id),
-        then ask the gif bot for a goal gif. Dedup lives in _publish_live_events, so a
-        goal is announced at most once per bot process."""
-        if not goals:
+    async def _enqueue_pending_goals(self, goals: list[dict]):
+        """Queue each newly-confirmed goal for the clip pump (one entry per goal). The
+        in-memory + Redis dedup in _publish_live_events guarantees each goal is enqueued
+        at most once per bot process."""
+        if not self.redis or not goals:
             return
+        now = int(time.time())
+        for g in goals:
+            mid = g.get("match_id")
+            if mid is None:
+                continue
+            entry = {"match_id": mid, "home": g["home"], "away": g["away"],
+                     "etype": g["etype"], "ev": g.get("ev") or {},
+                     "hs": g.get("hs"), "as_": g.get("as_"), "first_ts": now}
+            try:
+                await self.redis.rpush(f"live:pending_goal:{mid}", json.dumps(entry))
+                await self.redis.expire(f"live:pending_goal:{mid}", 3600)
+                await self.redis.sadd("live:pending_goal_index", str(mid))
+                await self.redis.expire("live:pending_goal_index", 3600)
+            except Exception:
+                pass
+
+    @tasks.loop(seconds=45)
+    async def _clip_pump(self):
+        """Fast loop (separate from the 5-min AI tick): resolve arrived Fox clips to a
+        live match, then pair pending goals with their clips and announce — clip if
+        present, text-only once a goal has waited CLIP_TIMEOUT."""
+        if not self.redis or not self.db:
+            return
+        try:
+            await self._drain_incoming_clips()
+            await self._pair_pending_goals()
+        except Exception as e:
+            log.warning("live_tracker: clip pump failed: %r", e)
+
+    @_clip_pump.before_loop
+    async def _before_pump(self):
+        await self.bot.wait_until_ready()
+
+    async def _drain_incoming_clips(self):
+        """Pop newly-uploaded clips and bucket each under the live match it belongs to.
+        Unresolved clips (no matching live game yet) are retried a few times then dropped."""
+        raws = []
+        for _ in range(50):
+            v = await self.redis.rpop("goal_clips:incoming")
+            if v is None:
+                break
+            raws.append(_dec(v))
+        if not raws:
+            return
+        live = await self._read_inwindow()
+        for raw in raws:
+            try:
+                clip = json.loads(raw)
+            except Exception:
+                continue
+            mid = self._resolve_match(clip, live)
+            if mid is not None:
+                await self.redis.rpush(f"goal_clips:ready:{mid}", json.dumps({
+                    "clip_id": clip.get("clip_id"),
+                    "home_score": clip.get("home_score"), "away_score": clip.get("away_score"),
+                    "scorer": clip.get("scorer"), "minute": clip.get("minute")}))
+                await self.redis.expire(f"goal_clips:ready:{mid}", 3 * 3600)
+            else:
+                att = int(clip.get("_attempts", 0)) + 1
+                if att <= 8:
+                    clip["_attempts"] = att
+                    await self.redis.rpush("goal_clips:incoming", json.dumps(clip))
+                    await self.redis.expire("goal_clips:incoming", 6 * 3600)
+                else:
+                    log.info("live_tracker: dropping unresolved clip %s (no live match)", clip.get("clip_id"))
+                    try:
+                        async with self.db.worker_session() as s:
+                            await s.execute(text("UPDATE goal_clips SET status='expired' WHERE id=:i"),
+                                            {"i": clip.get("clip_id")})
+                            await s.commit()
+                    except Exception:
+                        pass
+
+    def _resolve_match(self, clip: dict, live: list[dict]):
+        """Best-effort: map a clip's parsed team names to a live match id (≤1–2 live, so
+        a small alias map + substring compare is enough). None if nothing matches."""
+        ch, ca = _alias_team(clip.get("home_team")), _alias_team(clip.get("away_team"))
+        if not ch and not ca:
+            return None
+        best, best_score = None, 0
+        for m in live:
+            mh, ma = _alias_team(m.get("home_name")), _alias_team(m.get("away_name"))
+            score = (1 if ch and (_team_eq(ch, mh) or _team_eq(ch, ma)) else 0) \
+                  + (1 if ca and (_team_eq(ca, mh) or _team_eq(ca, ma)) else 0)
+            if score > best_score:
+                best, best_score = m["id"], score
+        return best if best_score >= 1 else None
+
+    async def _pair_pending_goals(self):
+        """For each match with queued goals, announce the oldest as soon as its clip is
+        ready, or text-only once it has waited CLIP_TIMEOUT. FIFO keeps goals in order."""
+        idx = await self.redis.smembers("live:pending_goal_index")
+        match_ids = [int(_dec(x)) for x in idx] if idx else []
+        if not match_ids:
+            return
+        async with self.db.worker_session() as s:
+            settings_rows = (await s.execute(
+                text("SELECT guild_id, settings_json FROM guild_settings"))).all()
+        now = int(time.time())
+        for mid in match_ids:
+            pkey = f"live:pending_goal:{mid}"
+            while True:
+                head_raw = _dec(await self.redis.lindex(pkey, 0))
+                if head_raw is None:
+                    await self.redis.srem("live:pending_goal_index", str(mid))
+                    break
+                try:
+                    goal = json.loads(head_raw)
+                except Exception:
+                    await self.redis.lpop(pkey)
+                    continue
+                clip = await self._take_ready_clip(mid, goal)
+                if clip is not None:
+                    await self.redis.lpop(pkey)
+                    await self._publish_and_announce_goal(settings_rows, goal, clip)
+                    continue
+                if now - int(goal.get("first_ts", now)) >= self.CLIP_TIMEOUT:
+                    await self.redis.lpop(pkey)
+                    await self._announce_goal(settings_rows, goal)
+                    continue
+                break  # head still waiting for its clip and not yet timed out (FIFO)
+
+    async def _take_ready_clip(self, mid: int, goal: dict):
+        """Pop a ready clip for this match — preferring one whose score matches the goal,
+        else the oldest. None if no clip is waiting."""
+        rkey = f"goal_clips:ready:{mid}"
+        raws = await self.redis.lrange(rkey, 0, -1)
+        if not raws:
+            return None
+        target = {goal.get("hs"), goal.get("as_")}
+        pick_raw = None
+        for raw in raws:
+            try:
+                c = json.loads(_dec(raw))
+            except Exception:
+                continue
+            cs = {c.get("home_score"), c.get("away_score")}
+            if None not in cs and cs == target:
+                pick_raw = raw
+                break
+        if pick_raw is None:
+            pick_raw = raws[0]
+        await self.redis.lrem(rkey, 1, pick_raw)
+        try:
+            return json.loads(_dec(pick_raw))
+        except Exception:
+            return None
+
+    async def _publish_and_announce_goal(self, settings_rows, goal: dict, clip: dict):
+        """Mark the clip posted, announce the goal with the clip attached, and push a
+        goal_clip event (with video_url) to the web feed."""
+        clip_id = clip.get("clip_id")
+        file_path = None
+        try:
+            async with self.db.worker_session() as s:
+                row = (await s.execute(
+                    text("SELECT file_path FROM goal_clips WHERE id=:i"), {"i": clip_id})).mappings().first()
+                if row:
+                    file_path = row["file_path"]
+                await s.execute(
+                    text("UPDATE goal_clips SET status='posted', match_id=:m, posted_at=now() WHERE id=:i"),
+                    {"m": goal.get("match_id"), "i": clip_id})
+                await s.commit()
+        except Exception as e:
+            log.warning("live_tracker: clip lookup/mark failed for clip %s: %r", clip_id, e)
+        await self._announce_goal(settings_rows, goal, clip_path=file_path, clip_id=clip_id)
+        home, away = goal["home"], goal["away"]
+        scorer = _team_name(goal.get("ev") or {}, home, away) or home
+        await self._push_event({"type": "goal_clip", "match_id": goal.get("match_id"),
+                                "home": home, "away": away,
+                                "video_url": f"/api/v1/goal-clips/{clip_id}/video",
+                                "text": f"🎥 Gol — {scorer}", "ts": int(time.time())})
+
+    async def _announce_goal(self, settings_rows, goal: dict, clip_path: str | None = None, clip_id=None):
+        """Post ONE confirmed goal to every enabled guild's goal channel — with the Fox
+        clip as a native video attachment when available, else text-only. Klipy gifs are
+        gone: the clip IS the goal media now."""
+        home, away = goal["home"], goal["away"]
+        ev = goal.get("ev") or {}
+        etype = goal.get("etype") or "goal"
+        scorer = _team_name(ev, home, away)
+        if etype == "own_goal":
+            # an own goal counts FOR the opposing side
+            scorer = away if scorer == home else home if scorer == away else scorer
+        other = away if scorer == home else home
+        player = str(ev.get("player") or "").strip()
+        minute = str(ev.get("minute") or "").strip()
+        detail = f" — {player}" if player else ""
+        if minute:
+            detail += f" ({minute}')" if minute[:1].isdigit() and not minute.endswith("'") else f" ({minute})"
+        msg = f"⚽ ¡GOOOL de **{scorer or home}** contra **{other}**!{detail}"
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
             if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
@@ -545,30 +656,22 @@ class LiveTracker(commands.Cog):
             # thread on match start) so servers can have a dedicated "goals" role.
             goal_role_id = settings.get("lt_goal_role_id")
             ping = f"<@&{int(goal_role_id)}> " if goal_role_id else ""
-            for g in goals:
-                home, away, ev = g["home"], g["away"], g["ev"]
-                scorer = _team_name(ev, home, away)
-                if g["etype"] == "own_goal":
-                    # an own goal counts FOR the opposing side
-                    scorer = away if scorer == home else home if scorer == away else scorer
-                other = away if scorer == home else home
-                player = str(ev.get("player") or "").strip()
-                minute = str(ev.get("minute") or "").strip()
-                detail = f" — {player}" if player else ""
-                if minute:
-                    detail += f" ({minute}')" if minute[:1].isdigit() and not minute.endswith("'") else f" ({minute})"
-                try:
-                    await channel.send(
-                        f"{ping}⚽ ¡GOOOL de **{scorer or home}** contra **{other}**!{detail}",
-                        allowed_mentions=discord.AllowedMentions(roles=True),
-                    )
-                    # Post the gif ourselves via Klipy (bots ignore pings from other
-                    # bots, so asking a gif bot never works). No gif → just skip it.
-                    gif = await self._goal_gif(scorer or home)
-                    if gif:
-                        await channel.send(gif)
-                except discord.HTTPException as e:
-                    log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
+            mentions = discord.AllowedMentions(roles=True)
+            try:
+                if clip_path and os.path.exists(clip_path):
+                    # Native upload → inline player (subject to the guild's upload limit).
+                    await channel.send(content=ping + msg, allowed_mentions=mentions,
+                                       file=discord.File(clip_path, filename=f"gol_{goal.get('match_id')}_{clip_id}.mp4"))
+                else:
+                    await channel.send(content=ping + msg, allowed_mentions=mentions)
+            except discord.HTTPException as e:
+                log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
+                # Oversized clip (or other send error) → retry text-only so the goal still lands.
+                if clip_path:
+                    try:
+                        await channel.send(content=ping + msg, allowed_mentions=mentions)
+                    except discord.HTTPException:
+                        pass
 
     async def _next_match(self) -> dict | None:
         async with self.db.worker_session() as s:
@@ -1371,6 +1474,40 @@ def _team_name(ev, home, away) -> str:
     if side in ("away", "visitor", "visitante", "away_team"):
         return away
     return str(ev.get("team") or "").strip()  # already a team name, or empty
+
+
+# Fox / common short names → our teams.name_en. Used to map a clip's parsed team
+# names to a live match (≤1–2 live at once, so this small map is enough).
+_TEAM_ALIASES = {
+    "usa": "united states", "us": "united states", "usmnt": "united states",
+    "united states of america": "united states",
+    "korea": "south korea", "korea republic": "south korea",
+    "republic of korea": "south korea", "south korea": "south korea",
+    "czechia": "czech republic",
+    "bosnia": "bosnia and herzegovina", "bosnia herzegovina": "bosnia and herzegovina",
+    "dr congo": "democratic republic of the congo", "drc": "democratic republic of the congo",
+    "congo dr": "democratic republic of the congo",
+    "cote divoire": "ivory coast", "cote d ivoire": "ivory coast", "ivory coast": "ivory coast",
+    "uae": "united arab emirates", "ksa": "saudi arabia",
+}
+
+
+def _alias_team(s) -> str:
+    """Normalize a team name (lowercase, strip accents/punctuation) and apply aliases."""
+    n = unicodedata.normalize("NFKD", str(s or "").lower()).encode("ascii", "ignore").decode()
+    n = re.sub(r"[^a-z0-9 ]", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return _TEAM_ALIASES.get(n, n)
+
+
+def _team_eq(a: str, b: str) -> bool:
+    """True if two normalized team names match — exact, or one contains the other
+    (guarded by length ≥ 4 so short tokens don't cross-match)."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return min(len(a), len(b)) >= 4 and (a in b or b in a)
 
 
 # Every event line says WHAT happened in words — emoji alone is ambiguous

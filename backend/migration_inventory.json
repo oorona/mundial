@@ -30,7 +30,7 @@
       "version": "1.3.0",
       "description": "Instrumentation — card_usage, guild_events, request_metrics, bot_command_metrics tables; app_config table for dynamic runtime configuration",
       "revisions": [
-        "f1a2b3c4d5e6",
+        "a5cfa2d557b9",
         "e1f2a3b4c5d6",
         "a1b2c3d4e5f6"
       ],
@@ -80,6 +80,15 @@
         "c1d2e3f4a5b6"
       ],
       "head_revision": "c1d2e3f4a5b6"
+    },
+    {
+      "plugin": "goal_clips",
+      "version": "1.0.0",
+      "description": "Ingests goal video clips from the Fox browser extension, stores them on the shared data volume, and exposes a public serving endpoint. The live_tracker cog pairs each clip with a stream-confirmed goal and posts it instead of a gif.",
+      "revisions": [
+        "a5cfa2d557b9"
+      ],
+      "head_revision": "a5cfa2d557b9"
     }
   ]
 }

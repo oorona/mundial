@@ -60,7 +60,7 @@ interface MatchBrief {
   home_pens?: number | null; away_pens?: number | null;
   finished: boolean; time_elapsed?: string | null; kickoff_unix: number | null; stadium?: Stadium | null;
 }
-interface FeedEvent { type: string; text?: string; home?: string; away?: string; ts?: number; }
+interface FeedEvent { type: string; text?: string; home?: string; away?: string; ts?: number; video_url?: string; }
 interface Group { group: string; standings: StandingRow[]; }
 interface TeamDetail {
   team: TeamBrief & { coach?: string; nickname?: string; confederation?: string; wc_appearances?: number; wc_first_year?: number; wc_best_result?: string; fifa_ranking?: number; wikipedia_url?: string };
@@ -650,7 +650,18 @@ function NowView({ onLiveChange }: { onLiveChange?: (live: boolean) => void }) {
       <div className="space-y-2">
         {events.map((ev, i) => (
           <div key={`${ev.ts}-${i}`} className="rounded-md border border-border bg-card px-3 py-2 text-sm leading-snug">
-            <span className="mr-2" aria-hidden="true">{ev.type === 'news' ? '📰' : ev.type === 'live' ? '⏱' : ''}</span>{ev.text}
+            <span className="mr-2" aria-hidden="true">{ev.type === 'goal_clip' ? '🎥' : ev.type === 'news' ? '📰' : ev.type === 'live' ? '⏱' : ''}</span>{ev.text}
+            {/* Fox goal clip: inline player. video_url is a relative path resolved against the app origin. */}
+            {ev.video_url && (
+              <video
+                src={ev.video_url}
+                controls
+                muted
+                playsInline
+                preload="metadata"
+                className="mt-2 w-full max-w-full rounded"
+              />
+            )}
           </div>
         ))}
       </div>

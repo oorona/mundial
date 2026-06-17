@@ -1,0 +1,20 @@
+{
+  "name": "goal_clips",
+  "display_name": "Mundial — Goal Clips",
+  "version": "1.0.0",
+  "description": "Ingests goal video clips from the Fox browser extension, stores them on the shared data volume, and exposes a public serving endpoint. The live_tracker cog pairs each clip with a stream-confirmed goal and posts it instead of a gif.",
+  "permission_level": 5,
+  "components": {
+    "cog": false,
+    "api": true,
+    "models": true,
+    "migration": true,
+    "frontend": false,
+    "translations": false,
+    "prompts": false
+  },
+  "router": {
+    "prefix": "/goal-clips",
+    "tag": "goal_clips"
+  }
+}

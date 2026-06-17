@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Fox Goal Clipper — Options</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 24px auto; padding: 0 16px; color: #111; }
+    h1 { font-size: 18px; }
+    label { display: block; margin-top: 14px; font-weight: 600; font-size: 13px; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+    .hint { color: #666; font-weight: 400; font-size: 12px; margin-top: 2px; }
+    button { margin-top: 18px; padding: 9px 16px; border: 0; border-radius: 6px; background: #ef4444; color: #fff; font-weight: 600; cursor: pointer; }
+    #status { margin-top: 12px; font-size: 13px; min-height: 18px; }
+    .ok { color: #16a34a; } .err { color: #dc2626; }
+  </style>
+</head>
+<body>
+  <h1>Fox Goal Clipper — Mundial 2026</h1>
+  <p class="hint">Keep the Fox account's profile (or a list) open in a tab during matches. This page configures where clips go and how they're classified. Everything is stored locally on this machine.</p>
+
+  <label>Server URL
+    <input id="serverUrl" type="url" placeholder="https://your-mundial-host" />
+    <span class="hint">The public app host. Clips POST to <code>/api/v1/goal-clips/ingest</code>.</span>
+  </label>
+
+  <label>Upload key
+    <input id="uploadKey" type="password" placeholder="contents of secrets/goal_clips_upload_key" />
+    <span class="hint">Must match the server's <code>goal_clips_upload_key</code> secret.</span>
+  </label>
+
+  <label>Gemini API key
+    <input id="llmApiKey" type="password" placeholder="AIza..." />
+    <span class="hint">Used on THIS machine to classify each post's text. Stays local.</span>
+  </label>
+
+  <label>Gemini model
+    <input id="llmModel" type="text" placeholder="gemini-flash-latest" />
+    <span class="hint">Leave blank for <code>gemini-flash-latest</code>.</span>
+  </label>
+
+  <label>Monitored handle
+    <input id="handle" type="text" placeholder="FoxSoccer" />
+    <span class="hint">Without the @. Only posts from this account are considered.</span>
+  </label>
+
+  <label>Confidence threshold
+    <input id="threshold" type="number" step="0.05" min="0" max="1" placeholder="0.6" />
+    <span class="hint">Minimum LLM confidence to treat a post as a goal (0–1).</span>
+  </label>
+
+  <button id="save">Save</button>
+  <div id="status"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

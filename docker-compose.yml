@@ -8,6 +8,8 @@ secrets:
     file: ./secrets/encryption_key
   klipy_api_key:
     file: ./secrets/klipy_api_key
+  goal_clips_upload_key:
+    file: ./secrets/goal_clips_upload_key  # auth for the Fox browser extension upload endpoint
 
 services:
   # Backend API (FastAPI)
@@ -17,6 +19,7 @@ services:
       dockerfile: Dockerfile
     secrets:
       - encryption_key
+      - goal_clips_upload_key  # validates X-Upload-Key on /goal-clips/ingest
     environment:
       ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
       SETTINGS_FILE_PATH: /data/settings.enc

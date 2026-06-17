@@ -29,5 +29,10 @@
     "name": "live_tracker",
     "prefix": "/guilds",
     "tag": "live_tracker"
+  },
+  {
+    "name": "goal_clips",
+    "prefix": "/goal-clips",
+    "tag": "goal_clips"
   }
 ]
