@@ -139,9 +139,10 @@ class LiveTracker(commands.Cog):
         ],
     }
 
-    # How long a stream-confirmed goal waits for its Fox clip before being announced
-    # text-only (so a goal is never left unannounced when Fox posts no clip).
-    CLIP_TIMEOUT = 210
+    # After the web stream confirms a goal, held/incoming Fox clips post for this long;
+    # outside the window clips are HELD until the next goal (the two streams — the lagging
+    # web score and the fast, noisy clip feed — are synced by TIME, not by scoreline).
+    CLIP_WINDOW = 300
 
     def __init__(self, bot):
         self.bot = bot
@@ -183,11 +184,10 @@ class LiveTracker(commands.Cog):
                 snapshot = await self._live_snapshot(s)
                 await s.commit()
             await self._broadcast(settings_rows, snapshot, ai)
-            new_goals = await self._publish_live_events(snapshot, ai)
-            # Goals are no longer announced inline with a gif. Each confirmed goal is
-            # queued; the fast _clip_pump loop posts it once its Fox clip arrives (or
-            # text-only after CLIP_TIMEOUT). This is what swaps the gif for a real clip.
-            await self._enqueue_pending_goals(new_goals)
+            # Pushes goal/score events to the WEB feed (Now tab). The Discord goal channel
+            # is driven separately by the _clip_pump time-sync loop (off the match score),
+            # so we no longer enqueue anything here.
+            await self._publish_live_events(snapshot, ai)
         else:
             # ── NEWS mode (every 8h when nothing is live): AI news about the next/
             # inauguration match → channel + app feed. Confirms the AI pipeline.
@@ -440,49 +440,27 @@ class LiveTracker(commands.Cog):
         except Exception:
             return True
 
-    # ── Goal clips (Fox browser extension) ───────────────────────────────────────
-    # Goals are no longer announced inline with a Klipy gif. Each confirmed goal is
-    # queued in Redis (live:pending_goal:{match}); the fast _clip_pump loop pairs it
-    # with a Fox goal clip uploaded by the browser extension (goal_clips plugin →
-    # Redis goal_clips:incoming) and posts the CLIP instead of a gif. If no clip
-    # arrives within CLIP_TIMEOUT, the goal is announced text-only so none is missed.
-
-    async def _enqueue_pending_goals(self, goals: list[dict]):
-        """Queue each newly-confirmed goal for the clip pump (one entry per goal). The
-        in-memory + Redis dedup in _publish_live_events guarantees each goal is enqueued
-        at most once per bot process."""
-        if not self.redis or not goals:
-            return
-        now = int(time.time())
-        for g in goals:
-            mid = g.get("match_id")
-            if mid is None:
-                continue
-            entry = {"match_id": mid, "home": g["home"], "away": g["away"],
-                     "etype": g["etype"], "ev": g.get("ev") or {},
-                     "hs": g.get("hs"), "as_": g.get("as_"), "first_ts": now}
-            try:
-                await self.redis.rpush(f"live:pending_goal:{mid}", json.dumps(entry))
-                await self.redis.expire(f"live:pending_goal:{mid}", 3600)
-                await self.redis.sadd("live:pending_goal_index", str(mid))
-                await self.redis.expire("live:pending_goal_index", 3600)
-            except Exception:
-                pass
+    # ── Goal clips (Fox browser extension) — two-stream time sync ────────────────
+    # Two independent streams must be synced: the WEB stream (live_tracker's grounded
+    # search) keeps the correct score but lags; the CLIP stream (the Fox extension)
+    # delivers the video fast but with noisy score/team metadata. So we pair by TIME,
+    # not score: a clip that resolves to a match is HELD; when the web score rises we
+    # announce the goal (with the reliable score) and open a ~CLIP_WINDOW window during
+    # which held + incoming clips post (video only, NO score). Then back to holding.
 
     @tasks.loop(seconds=45)
     async def _clip_pump(self):
-        """Fast loop (separate from the 5-min AI tick): resolve arrived Fox clips to a
-        live match, then pair pending goals with their clips and announce — clip if
-        present, text-only once a goal has waited CLIP_TIMEOUT."""
+        """Fast loop syncing the two streams by TIME: hold arrived clips, announce a goal
+        when the web score rises, and release held clips during the post-goal window."""
         if not self.redis or not self.db:
             return
         try:
             await self._drain_incoming_clips()
+            live = await self._read_inwindow()
             async with self.db.worker_session() as s:
                 settings_rows = (await s.execute(
                     text("SELECT guild_id, settings_json FROM guild_settings"))).all()
-            await self._pair_pending_goals(settings_rows)
-            await self._post_ripe_clips(settings_rows)
+            await self._sync_clips(settings_rows, live)
         except Exception as e:
             log.warning("live_tracker: clip pump failed: %r", e)
 
@@ -547,148 +525,96 @@ class LiveTracker(commands.Cog):
                 best, best_score = m["id"], score
         return best if best_score >= 1 else None
 
-    async def _pair_pending_goals(self, settings_rows):
-        """For each match with queued goals, announce the oldest as soon as its clip is
-        ready, or text-only once it has waited CLIP_TIMEOUT. FIFO keeps goals in order."""
-        idx = await self.redis.smembers("live:pending_goal_index")
-        match_ids = [int(_dec(x)) for x in idx] if idx else []
-        if not match_ids:
-            return
-        now = int(time.time())
-        for mid in match_ids:
-            pkey = f"live:pending_goal:{mid}"
-            while True:
-                head_raw = _dec(await self.redis.lindex(pkey, 0))
-                if head_raw is None:
-                    await self.redis.srem("live:pending_goal_index", str(mid))
-                    break
-                try:
-                    goal = json.loads(head_raw)
-                except Exception:
-                    await self.redis.lpop(pkey)
-                    continue
-                clip = await self._take_ready_clip(mid, goal)
-                if clip is not None:
-                    await self.redis.lpop(pkey)
-                    await self._publish_and_announce_goal(settings_rows, goal, clip)
-                    continue
-                if now - int(goal.get("first_ts", now)) >= self.CLIP_TIMEOUT:
-                    await self.redis.lpop(pkey)
-                    await self._announce_goal(settings_rows, goal)
-                    await self._mark_announced(mid, goal.get("hs"), goal.get("as_"))
-                    continue
-                break  # head still waiting for its clip and not yet timed out (FIFO)
-
-    async def _post_ripe_clips(self, settings_rows):
-        """Post any ready clip whose scoreline matches its match's CURRENT live score —
-        the live score IS the stream confirmation, so this catches clips that arrive after
-        the pending-goal window closed (the timing race) or when the AI only moved the
-        score without emitting a discrete goal event. Without this, a correct clip can sit
-        unpaired forever. A matching pending goal (if any) is consumed so it isn't ALSO
-        announced text-only."""
-        idx = await self.redis.smembers("goal_clips:ready_index")
-        mids = [int(_dec(x)) for x in idx] if idx else []
-        if not mids:
+    async def _sync_clips(self, settings_rows, live):
+        """Run the per-match hold/announce/window state machine for every live match (plus
+        any match still holding clips)."""
+        ids = {m["id"] for m in live}
+        try:
+            idx = await self.redis.smembers("goal_clips:ready_index")
+            ids |= {int(_dec(x)) for x in (idx or set())}
+        except Exception:
+            pass
+        if not ids:
             return
         async with self.db.worker_session() as s:
             rows = (await s.execute(text("""
                 SELECT m.id AS id, m.home_score AS hs, m.away_score AS as_,
                        ht.name_en AS home, at.name_en AS away
                 FROM matches m JOIN teams ht ON ht.id=m.home_team_id JOIN teams at ON at.id=m.away_team_id
-                WHERE m.id = ANY(:ids)"""), {"ids": mids})).mappings().all()
-        cur = {r["id"]: dict(r) for r in rows}
-        for mid in mids:
-            rkey = f"goal_clips:ready:{mid}"
-            raws = await self.redis.lrange(rkey, 0, -1)
-            if not raws:
-                await self.redis.srem("goal_clips:ready_index", str(mid))
-                continue
-            m = cur.get(mid)
-            if not m or m["hs"] is None:
-                continue
-            H, A = m["hs"] or 0, m["as_"] or 0
-            if H + A == 0:
-                continue  # match still 0-0 — wait for a goal before posting any clip
-            for raw in raws:
-                try:
-                    c = json.loads(_dec(raw))
-                except Exception:
-                    await self.redis.lrem(rkey, 1, raw)
-                    continue
-                # The client LLM's team/score parsing is noisy, so we do NOT gate on an exact
-                # scoreline history (that missed goals scored before tracking began, and a
-                # mis-parsed score blocked good clips). The clip already resolved to THIS live
-                # match by team, so post it once the match has a goal. Use the clip's scoreline
-                # only when it's plausible (non-zero and not exceeding the current score in
-                # either orientation, since Fox may flip home/away); otherwise label by scorer
-                # with no invented scoreline.
-                hs, as_ = c.get("home_score"), c.get("away_score")
-                plausible = (
-                    hs is not None and as_ is not None and (hs + as_) > 0
-                    and ((hs <= H and as_ <= A) or (hs <= A and as_ <= H))
-                )
-                await self.redis.lrem(rkey, 1, raw)
-                if plausible:
-                    replay = await self._was_announced(mid, hs, as_)
-                    await self._consume_pending_goal(mid, {hs, as_})
-                    goal = {"match_id": mid, "home": m["home"], "away": m["away"], "etype": "goal",
-                            "ev": {"player": c.get("scorer"), "minute": c.get("minute")},
-                            "hs": hs, "as_": as_}
-                    await self._publish_and_announce_goal(settings_rows, goal, c, replay=replay)
-                else:
-                    goal = {"match_id": mid, "home": m["home"], "away": m["away"], "etype": "goal",
-                            "ev": {"player": c.get("scorer"), "minute": c.get("minute")},
-                            "hs": None, "as_": None}
-                    await self._publish_and_announce_goal(settings_rows, goal, c, replay=False)
+                WHERE m.id = ANY(:ids)"""), {"ids": list(ids)})).mappings().all()
+        now = int(time.time())
+        for r in rows:
+            await self._sync_match(settings_rows, r["id"], r["home"], r["away"],
+                                   r["hs"] or 0, r["as_"] or 0, now)
 
-    async def _consume_pending_goal(self, mid: int, score_set: set):
-        """Drop a pending goal for this match whose score matches, so a clip posted via the
-        live-score path doesn't also get announced text-only by the timeout path."""
-        pkey = f"live:pending_goal:{mid}"
+    async def _sync_match(self, settings_rows, mid, home, away, H, A, now):
+        """Announce the goal when the web score rises (opening the clip window), then
+        release held clips while that window is open. The web stream owns the score; the
+        clip stream owns the video. Pairing is by TIME, not scoreline."""
+        total = H + A
+        ak = f"clips:announced_total:{mid}"
+        wk = f"clips:window_until:{mid}"
         try:
-            for raw in await self.redis.lrange(pkey, 0, -1):
-                try:
-                    g = json.loads(_dec(raw))
-                except Exception:
-                    continue
-                if {g.get("hs"), g.get("as_")} == score_set:
-                    await self.redis.lrem(pkey, 1, raw)
-                    return
+            prev = _dec(await self.redis.get(ak))
         except Exception:
-            pass
+            prev = None
+        if prev is None:
+            # First sight — record the current total WITHOUT announcing, so goals scored
+            # before we started (or before a restart) aren't replayed.
+            await self.redis.set(ak, total, ex=6 * 3600)
+        elif total > int(prev):
+            # Web stream confirmed a goal → announce once (reliable score) + open the window.
+            await self._announce_goal_text(settings_rows, home, away, H, A)
+            await self.redis.set(ak, total, ex=6 * 3600)
+            await self.redis.set(wk, now + self.CLIP_WINDOW, ex=6 * 3600)
+        try:
+            wu = _dec(await self.redis.get(wk))
+            wu = int(wu) if wu is not None else 0
+        except Exception:
+            wu = 0
+        if now < wu:
+            await self._flush_held_clips(settings_rows, mid, home, away)
 
-    async def _take_ready_clip(self, mid: int, goal: dict):
-        """Pop a ready clip for this match — preferring one whose score matches the goal,
-        else the oldest. None if no clip is waiting."""
-        rkey = f"goal_clips:ready:{mid}"
-        raws = await self.redis.lrange(rkey, 0, -1)
-        if not raws:
-            return None
-        target = {goal.get("hs"), goal.get("as_")}
-        pick_raw = None
-        for raw in raws:
+    async def _announce_goal_text(self, settings_rows, home, away, H, A):
+        """Post the goal announcement (web stream, authoritative score) once to every
+        enabled guild's goal channel, with the goal-ping role."""
+        msg = f"⚽ ¡GOOOL! **{home} {H}–{A} {away}**"
+        for guild_id, settings_json in settings_rows:
+            settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
+            if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
+                continue
+            guild = self.bot.get_guild(int(guild_id))
+            channel = guild.get_channel(int(settings["lt_goal_channel_id"])) if guild else None
+            if channel is None:
+                continue
+            goal_role_id = settings.get("lt_goal_role_id")
+            ping = f"<@&{int(goal_role_id)}> " if goal_role_id else ""
             try:
-                c = json.loads(_dec(raw))
+                await channel.send(content=ping + msg,
+                                   allowed_mentions=discord.AllowedMentions(roles=True))
+            except discord.HTTPException as e:
+                log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
+
+    async def _flush_held_clips(self, settings_rows, mid, home, away):
+        """Post every clip currently held for this match (the window is open)."""
+        rkey = f"goal_clips:ready:{mid}"
+        while True:
+            raw = _dec(await self.redis.lpop(rkey))
+            if raw is None:
+                try:
+                    await self.redis.srem("goal_clips:ready_index", str(mid))
+                except Exception:
+                    pass
+                break
+            try:
+                clip = json.loads(raw)
             except Exception:
                 continue
-            cs = {c.get("home_score"), c.get("away_score")}
-            if None not in cs and cs == target:
-                pick_raw = raw
-                break
-        # Require an exact scoreline match — do NOT fall back to an arbitrary clip.
-        # A stranded clip (e.g. a 1-0 that missed its window) must never be posted for
-        # a different goal (e.g. the 2-0). No match → wait / time out to text-only.
-        if pick_raw is None:
-            return None
-        await self.redis.lrem(rkey, 1, pick_raw)
-        try:
-            return json.loads(_dec(pick_raw))
-        except Exception:
-            return None
+            await self._post_clip(settings_rows, mid, home, away, clip)
 
-    async def _publish_and_announce_goal(self, settings_rows, goal: dict, clip: dict, replay: bool = False):
-        """Mark the clip posted, announce the goal (or replay) with the clip attached, and
-        push a goal_clip event (with video_url) to the web feed."""
+    async def _post_clip(self, settings_rows, mid, home, away, clip):
+        """Post ONE clip as a video to every enabled guild's goal channel — team(s) only,
+        NO score (the clip stream's score is unreliable) — and push it to the web feed."""
         clip_id = clip.get("clip_id")
         file_path = None
         try:
@@ -699,76 +625,14 @@ class LiveTracker(commands.Cog):
                     file_path = row["file_path"]
                 await s.execute(
                     text("UPDATE goal_clips SET status='posted', match_id=:m, posted_at=now() WHERE id=:i"),
-                    {"m": goal.get("match_id"), "i": clip_id})
+                    {"m": mid, "i": clip_id})
                 await s.commit()
         except Exception as e:
             log.warning("live_tracker: clip lookup/mark failed for clip %s: %r", clip_id, e)
-        await self._announce_goal(settings_rows, goal, clip_path=file_path, clip_id=clip_id, replay=replay)
-        await self._mark_announced(goal.get("match_id"), goal.get("hs"), goal.get("as_"))
-        home, away = goal["home"], goal["away"]
-        hs, as_ = goal.get("hs"), goal.get("as_")
-        score = f"{hs}–{as_}" if hs is not None and as_ is not None else ""
-        label = "🎥 Repetición" if replay else "🎥 Gol"
-        await self._push_event({"type": "goal_clip", "match_id": goal.get("match_id"),
-                                "home": home, "away": away,
-                                "video_url": f"/api/v1/goal-clips/{clip_id}/video",
-                                "text": f"{label} · {home} {score} {away}".strip(), "ts": int(time.time())})
-
-    async def _was_announced(self, mid: int, hs, as_) -> bool:
-        """True if this goal's scoreline was already announced (text-only or an earlier
-        clip) — used to label a later clip as a replay."""
-        if not self.redis:
-            return False
-        try:
-            return bool(await self.redis.sismember(f"live:announced_scores:{mid}", _sl(hs, as_)))
-        except Exception:
-            return False
-
-    async def _mark_announced(self, mid: int, hs, as_):
-        if not self.redis:
+        if not file_path or not os.path.exists(file_path):
+            log.warning("live_tracker: clip %s file missing — skipping", clip_id)
             return
-        try:
-            await self.redis.sadd(f"live:announced_scores:{mid}", _sl(hs, as_))
-            await self.redis.expire(f"live:announced_scores:{mid}", 6 * 3600)
-        except Exception:
-            pass
-
-    async def _announce_goal(self, settings_rows, goal: dict, clip_path: str | None = None,
-                             clip_id=None, replay: bool = False):
-        """Post ONE confirmed goal to every enabled guild's goal channel — with the Fox
-        clip as a native video attachment when available, else text-only. Klipy gifs are
-        gone: the clip IS the goal media now. ``replay`` frames a clip that arrived after
-        the goal was already announced, so it's clear which goal the clip shows."""
-        home, away = goal["home"], goal["away"]
-        ev = goal.get("ev") or {}
-        etype = goal.get("etype") or "goal"
-        player = str(ev.get("player") or "").strip()
-        minute = str(ev.get("minute") or "").strip()
-        detail = f" — {player}" if player else ""
-        if minute:
-            detail += f" ({minute}')" if minute[:1].isdigit() and not minute.endswith("'") else f" ({minute})"
-        hs, as_ = goal.get("hs"), goal.get("as_")
-        score = f"{hs}–{as_}" if hs is not None and as_ is not None else "vs"
-        if hs is None or as_ is None:
-            # Clip with no parsed scoreline (brace/celebration post) → label by scorer;
-            # the clip itself shows the goal. No invented scoreline.
-            msg = f"⚽ ¡GOL!{detail} · {home} vs {away}"
-        elif replay:
-            # Late clip of an already-announced goal — label it a replay, with the
-            # scoreline so there's no confusion about which goal it is.
-            msg = f"🎥 Repetición del gol · **{home} {score} {away}**{detail}"
-        elif str(ev.get("team") or "").strip():
-            # The stream told us which side scored → "GOOOL de X contra Y".
-            scorer = _team_name(ev, home, away)
-            if etype == "own_goal":
-                # an own goal counts FOR the opposing side
-                scorer = away if scorer == home else home if scorer == away else scorer
-            other = away if scorer == home else home
-            msg = f"⚽ ¡GOOOL de **{scorer or home}** contra **{other}**!{detail}"
-        else:
-            # Clip-driven post (scoring side unknown, corroborated by the live score) →
-            # announce the scoreline + scorer instead of guessing which team scored.
-            msg = f"⚽ ¡GOOOL! **{home} {score} {away}**{detail}"
+        cap = f"🎥 **{home} vs {away}**"
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
             if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
@@ -777,26 +641,14 @@ class LiveTracker(commands.Cog):
             channel = guild.get_channel(int(settings["lt_goal_channel_id"])) if guild else None
             if channel is None:
                 continue
-            # Goal-ping role: separate from lt_notify_role_id (which tags the stream
-            # thread on match start) so servers can have a dedicated "goals" role.
-            goal_role_id = settings.get("lt_goal_role_id")
-            ping = f"<@&{int(goal_role_id)}> " if goal_role_id else ""
-            mentions = discord.AllowedMentions(roles=True)
             try:
-                if clip_path and os.path.exists(clip_path):
-                    # Native upload → inline player (subject to the guild's upload limit).
-                    await channel.send(content=ping + msg, allowed_mentions=mentions,
-                                       file=discord.File(clip_path, filename=f"gol_{goal.get('match_id')}_{clip_id}.mp4"))
-                else:
-                    await channel.send(content=ping + msg, allowed_mentions=mentions)
+                await channel.send(content=cap,
+                                   file=discord.File(file_path, filename=f"gol_{mid}_{clip_id}.mp4"))
             except discord.HTTPException as e:
-                log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
-                # Oversized clip (or other send error) → retry text-only so the goal still lands.
-                if clip_path:
-                    try:
-                        await channel.send(content=ping + msg, allowed_mentions=mentions)
-                    except discord.HTTPException:
-                        pass
+                log.warning("live_tracker: clip post failed (guild %s): %r", guild_id, e)
+        await self._push_event({"type": "goal_clip", "match_id": mid, "home": home, "away": away,
+                                "video_url": f"/api/v1/goal-clips/{clip_id}/video",
+                                "text": f"🎥 {home} vs {away}", "ts": int(time.time())})
 
     async def _next_match(self) -> dict | None:
         async with self.db.worker_session() as s:
@@ -1633,17 +1485,6 @@ def _team_eq(a: str, b: str) -> bool:
     if a == b:
         return True
     return min(len(a), len(b)) >= 4 and (a in b or b in a)
-
-
-def _sl(h, a) -> str:
-    """Canonical, orientation-agnostic scoreline key (Fox's home/away may be flipped vs
-    ours). e.g. 2-1 and 1-2 both → '1-2'. Each goal in a match has a unique total, so
-    these keys never collide across goals — a clip's key maps to exactly one goal."""
-    try:
-        h, a = int(h), int(a)
-    except (TypeError, ValueError):
-        return ""
-    return f"{min(h, a)}-{max(h, a)}"
 
 
 # Every event line says WHAT happened in words — emoji alone is ambiguous
