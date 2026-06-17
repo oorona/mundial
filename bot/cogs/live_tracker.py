@@ -575,6 +575,7 @@ class LiveTracker(commands.Cog):
                 if now - int(goal.get("first_ts", now)) >= self.CLIP_TIMEOUT:
                     await self.redis.lpop(pkey)
                     await self._announce_goal(settings_rows, goal)
+                    await self._mark_announced(mid, goal.get("hs"), goal.get("as_"))
                     continue
                 break  # head still waiting for its clip and not yet timed out (FIFO)
 
@@ -605,22 +606,36 @@ class LiveTracker(commands.Cog):
             m = cur.get(mid)
             if not m or m["hs"] is None:
                 continue
-            match_set = {m["hs"], m["as_"]}
+            # Record the match's current scoreline as a confirmed goal moment (scores only
+            # rise, so each scoreline is one distinct goal). A clip posts whenever its
+            # scoreline matches ANY confirmed moment — so every clip for a goal posts,
+            # including a replay that arrives long after the goal was announced, while a
+            # wrong-score clip never does. 0-0 is not a goal.
+            gkey = f"live:goal_scores:{mid}"
+            if (m["hs"] or 0) + (m["as_"] or 0) > 0:
+                await self.redis.sadd(gkey, _sl(m["hs"], m["as_"]))
+                await self.redis.expire(gkey, 6 * 3600)
+            confirmed = {_dec(x) for x in (await self.redis.smembers(gkey) or set())}
+            if not confirmed:
+                continue
             for raw in raws:
                 try:
                     c = json.loads(_dec(raw))
                 except Exception:
                     await self.redis.lrem(rkey, 1, raw)
                     continue
-                cs = {c.get("home_score"), c.get("away_score")}
-                if None in cs or cs != match_set:
-                    continue  # live score doesn't corroborate this clip yet
+                hs, as_ = c.get("home_score"), c.get("away_score")
+                if hs is None or as_ is None or _sl(hs, as_) not in confirmed:
+                    continue  # not (yet) a confirmed goal scoreline
                 await self.redis.lrem(rkey, 1, raw)
-                await self._consume_pending_goal(mid, match_set)
+                # If the goal was already announced (text-only, or an earlier clip), this
+                # one is a replay — label it as such so the clip's goal is unambiguous.
+                replay = await self._was_announced(mid, hs, as_)
+                await self._consume_pending_goal(mid, {hs, as_})
                 goal = {"match_id": mid, "home": m["home"], "away": m["away"], "etype": "goal",
                         "ev": {"player": c.get("scorer"), "minute": c.get("minute")},
-                        "hs": m["hs"], "as_": m["as_"]}
-                await self._publish_and_announce_goal(settings_rows, goal, c)
+                        "hs": hs, "as_": as_}
+                await self._publish_and_announce_goal(settings_rows, goal, c, replay=replay)
 
     async def _consume_pending_goal(self, mid: int, score_set: set):
         """Drop a pending goal for this match whose score matches, so a clip posted via the
@@ -656,17 +671,20 @@ class LiveTracker(commands.Cog):
             if None not in cs and cs == target:
                 pick_raw = raw
                 break
+        # Require an exact scoreline match — do NOT fall back to an arbitrary clip.
+        # A stranded clip (e.g. a 1-0 that missed its window) must never be posted for
+        # a different goal (e.g. the 2-0). No match → wait / time out to text-only.
         if pick_raw is None:
-            pick_raw = raws[0]
+            return None
         await self.redis.lrem(rkey, 1, pick_raw)
         try:
             return json.loads(_dec(pick_raw))
         except Exception:
             return None
 
-    async def _publish_and_announce_goal(self, settings_rows, goal: dict, clip: dict):
-        """Mark the clip posted, announce the goal with the clip attached, and push a
-        goal_clip event (with video_url) to the web feed."""
+    async def _publish_and_announce_goal(self, settings_rows, goal: dict, clip: dict, replay: bool = False):
+        """Mark the clip posted, announce the goal (or replay) with the clip attached, and
+        push a goal_clip event (with video_url) to the web feed."""
         clip_id = clip.get("clip_id")
         file_path = None
         try:
@@ -681,18 +699,42 @@ class LiveTracker(commands.Cog):
                 await s.commit()
         except Exception as e:
             log.warning("live_tracker: clip lookup/mark failed for clip %s: %r", clip_id, e)
-        await self._announce_goal(settings_rows, goal, clip_path=file_path, clip_id=clip_id)
+        await self._announce_goal(settings_rows, goal, clip_path=file_path, clip_id=clip_id, replay=replay)
+        await self._mark_announced(goal.get("match_id"), goal.get("hs"), goal.get("as_"))
         home, away = goal["home"], goal["away"]
-        scorer = _team_name(goal.get("ev") or {}, home, away) or home
+        hs, as_ = goal.get("hs"), goal.get("as_")
+        score = f"{hs}–{as_}" if hs is not None and as_ is not None else ""
+        label = "🎥 Repetición" if replay else "🎥 Gol"
         await self._push_event({"type": "goal_clip", "match_id": goal.get("match_id"),
                                 "home": home, "away": away,
                                 "video_url": f"/api/v1/goal-clips/{clip_id}/video",
-                                "text": f"🎥 Gol — {scorer}", "ts": int(time.time())})
+                                "text": f"{label} · {home} {score} {away}".strip(), "ts": int(time.time())})
 
-    async def _announce_goal(self, settings_rows, goal: dict, clip_path: str | None = None, clip_id=None):
+    async def _was_announced(self, mid: int, hs, as_) -> bool:
+        """True if this goal's scoreline was already announced (text-only or an earlier
+        clip) — used to label a later clip as a replay."""
+        if not self.redis:
+            return False
+        try:
+            return bool(await self.redis.sismember(f"live:announced_scores:{mid}", _sl(hs, as_)))
+        except Exception:
+            return False
+
+    async def _mark_announced(self, mid: int, hs, as_):
+        if not self.redis:
+            return
+        try:
+            await self.redis.sadd(f"live:announced_scores:{mid}", _sl(hs, as_))
+            await self.redis.expire(f"live:announced_scores:{mid}", 6 * 3600)
+        except Exception:
+            pass
+
+    async def _announce_goal(self, settings_rows, goal: dict, clip_path: str | None = None,
+                             clip_id=None, replay: bool = False):
         """Post ONE confirmed goal to every enabled guild's goal channel — with the Fox
         clip as a native video attachment when available, else text-only. Klipy gifs are
-        gone: the clip IS the goal media now."""
+        gone: the clip IS the goal media now. ``replay`` frames a clip that arrived after
+        the goal was already announced, so it's clear which goal the clip shows."""
         home, away = goal["home"], goal["away"]
         ev = goal.get("ev") or {}
         etype = goal.get("etype") or "goal"
@@ -701,7 +743,13 @@ class LiveTracker(commands.Cog):
         detail = f" — {player}" if player else ""
         if minute:
             detail += f" ({minute}')" if minute[:1].isdigit() and not minute.endswith("'") else f" ({minute})"
-        if str(ev.get("team") or "").strip():
+        hs, as_ = goal.get("hs"), goal.get("as_")
+        score = f"{hs}–{as_}" if hs is not None and as_ is not None else "vs"
+        if replay:
+            # Late clip of an already-announced goal — label it a replay, with the
+            # scoreline so there's no confusion about which goal it is.
+            msg = f"🎥 Repetición del gol · **{home} {score} {away}**{detail}"
+        elif str(ev.get("team") or "").strip():
             # The stream told us which side scored → "GOOOL de X contra Y".
             scorer = _team_name(ev, home, away)
             if etype == "own_goal":
@@ -712,8 +760,6 @@ class LiveTracker(commands.Cog):
         else:
             # Clip-driven post (scoring side unknown, corroborated by the live score) →
             # announce the scoreline + scorer instead of guessing which team scored.
-            hs, as_ = goal.get("hs"), goal.get("as_")
-            score = f"{hs}–{as_}" if hs is not None and as_ is not None else "vs"
             msg = f"⚽ ¡GOOOL! **{home} {score} {away}**{detail}"
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
@@ -1579,6 +1625,17 @@ def _team_eq(a: str, b: str) -> bool:
     if a == b:
         return True
     return min(len(a), len(b)) >= 4 and (a in b or b in a)
+
+
+def _sl(h, a) -> str:
+    """Canonical, orientation-agnostic scoreline key (Fox's home/away may be flipped vs
+    ours). e.g. 2-1 and 1-2 both → '1-2'. Each goal in a match has a unique total, so
+    these keys never collide across goals — a clip's key maps to exactly one goal."""
+    try:
+        h, a = int(h), int(a)
+    except (TypeError, ValueError):
+        return ""
+    return f"{min(h, a)}-{max(h, a)}"
 
 
 # Every event line says WHAT happened in words — emoji alone is ambiguous
