@@ -96,6 +96,27 @@ _INWINDOW_SQL = text("""
                                         ELSE interval '3 hours' END)
 """)
 
+# Post-match reconcile sweep. A committed final can lock a score moments before a
+# 90'+ goal is indexed (the live read settles on a stoppage-time or pre-whistle
+# state, then the match leaves the in-window query and is never re-checked). This
+# picks finished matches back up ONCE the result has had time to settle and become
+# well-indexed — roughly an hour after a group game ends (~kickoff+170') — and
+# re-reads the DEFINITIVE final so a missed late goal gets corrected. Capped at 6h
+# so old games are never re-polled; a Redis marker makes it fire once per match.
+_RECONCILE_SQL = text("""
+    SELECT m.id AS id, m.type AS round_code,
+           ht.name_en AS home_name, at.name_en AS away_name,
+           m.home_score AS hs, m.away_score AS as_,
+           m.home_pens AS hp, m.away_pens AS ap
+    FROM matches m
+    JOIN teams ht ON ht.id = m.home_team_id
+    JOIN teams at ON at.id = m.away_team_id
+    WHERE m.finished = true
+      AND m.kickoff_at IS NOT NULL
+      AND m.kickoff_at <= now() - interval '170 minutes'
+      AND m.kickoff_at >= now() - interval '6 hours'
+""")
+
 
 class LiveTracker(commands.Cog):
     """AI live-score worker: polls in-progress matches, commits confident finals, recomputes standings/bracket, re-scores predictions, and streams live events to Discord + the web."""
@@ -171,6 +192,13 @@ class LiveTracker(commands.Cog):
                 except Exception:
                     pass
             await self._maybe_news(provider)
+        # Post-match safety sync runs in BOTH modes: a game that finished earlier may
+        # still need its final reconciled while a newer game is live (or none is).
+        # Isolated so a reconcile hiccup never kills the tick loop.
+        try:
+            await self._reconcile_finals(provider)
+        except Exception as e:
+            log.warning("live_tracker: reconcile pass failed: %r", e)
 
     async def _fresh_window_wipe(self):
         """When a live window OPENS (no game was in window before this tick), clear
@@ -698,22 +726,111 @@ class LiveTracker(commands.Cog):
                 tools=[{"google_search": {}}],
             )
             grounded = grounded if isinstance(grounded, str) else json.dumps(grounded)
-
-            parse_sys = self.llm.load_prompt("live_tracker", "score_parse", "system_prompt") or (
-                "Extrae un objeto JSON estricto del texto, incluido el arreglo 'events' con cada gol, "
-                "tarjeta, cambio, penal y VAR (type, team='home'/'away', minute, player, detail). "
-                "Si no estás seguro, baja la confianza."
-            )
-            parse_tmpl = self.llm.load_prompt("live_tracker", "score_parse", "user_prompt") or "{text}"
-            schema = await self._score_schema()
-            data = await self.llm.generate_structured(
-                parse_tmpl.format(text=grounded), schema, system_prompt=parse_sys
-            )
-            if isinstance(data, dict) and "home_score" in data and "away_score" in data:
-                return data
+            return await self._parse_score(grounded)
         except Exception:
             return None
+
+    async def _parse_score(self, grounded: str) -> dict | None:
+        """Second leg of the AI pipeline: turn grounded prose into strict score JSON.
+        Shared by the live poll and the post-match reconcile read."""
+        parse_sys = self.llm.load_prompt("live_tracker", "score_parse", "system_prompt") or (
+            "Extrae un objeto JSON estricto del texto, incluido el arreglo 'events' con cada gol, "
+            "tarjeta, cambio, penal y VAR (type, team='home'/'away', minute, player, detail). "
+            "Si no estás seguro, baja la confianza."
+        )
+        parse_tmpl = self.llm.load_prompt("live_tracker", "score_parse", "user_prompt") or "{text}"
+        schema = await self._score_schema()
+        data = await self.llm.generate_structured(
+            parse_tmpl.format(text=grounded), schema, system_prompt=parse_sys
+        )
+        if isinstance(data, dict) and "home_score" in data and "away_score" in data:
+            return data
         return None
+
+    async def _ai_final(self, provider, m: dict) -> dict | None:
+        """Grounded re-read of a FINISHED match's definitive full-time score from
+        post-match reports (not live minute-by-minute, not a half-time recap). Used by
+        the reconcile sweep an hour after the game ends, when the result is settled."""
+        try:
+            from services.llm import LLMMessage
+            sys = self.llm.load_prompt("live_tracker", "score_fetch", "system_prompt") or (
+                "Eres un asistente que verifica el resultado FINAL de un partido del Mundial 2026 "
+                "usando la búsqueda en internet. Responde ÚNICAMENTE en español (es-MX)."
+            )
+            user = (
+                f"El partido {m['home_name']} vs {m['away_name']} del Mundial 2026 YA TERMINÓ hace cerca "
+                f"de una hora. Usando la búsqueda en crónicas POSTERIORES al partido (resultado final, NO "
+                f"transmisiones en vivo ni resúmenes del medio tiempo), dame el MARCADOR FINAL definitivo a "
+                f"tiempo completo y la lista completa de goles (goleador y minuto, incluidos los del tiempo "
+                f"añadido y la prórroga). Tengo registrado {m['home_name']} {m.get('hs')}–{m.get('as_')} "
+                f"{m['away_name']}; confírmalo, o corrígelo SOLO si varias fuentes coinciden claramente en "
+                f"otro marcador final. Marca finished=true y confianza alta únicamente si las fuentes "
+                f"concuerdan en el resultado definitivo."
+            )
+            grounded = await provider.generate_response(
+                [LLMMessage(role="user", content=user)],
+                system_prompt=sys,
+                tools=[{"google_search": {}}],
+            )
+            grounded = grounded if isinstance(grounded, str) else json.dumps(grounded)
+            return await self._parse_score(grounded)
+        except Exception:
+            return None
+
+    async def _reconcile_finals(self, provider):
+        """Re-verify committed finals ~1h after the match ends and correct any score that
+        missed a late goal at commit time. The live commit can lock a score during 2nd-half
+        stoppage or right at FT, before a 90'+ goal is indexed; an hour later the result is
+        settled, so one grounded re-read of the FINAL fixes those misses, then standings /
+        bracket / predictions are recomputed. Fires at most once per match — the Redis
+        marker is set only after a confident reading, so a failed read retries next tick."""
+        if not provider or not self.redis:
+            return
+        async with self.db.worker_session() as s:
+            finals = [dict(r) for r in (await s.execute(_RECONCILE_SQL)).mappings().all()]
+        pending = []
+        for m in finals:
+            try:
+                if await self.redis.get(f"live:reconciled:{m['id']}"):
+                    continue
+            except Exception:
+                pass
+            pending.append(m)
+        if not pending:
+            return
+        changed = False
+        async with self.db.worker_session() as s:
+            for m in pending:
+                r = await self._ai_final(provider, m)
+                if not r or not r.get("finished"):
+                    continue
+                hs, as_ = r.get("home_score"), r.get("away_score")
+                if hs is None or as_ is None or float(r.get("confidence", 0)) < 0.8:
+                    continue
+                # Confident, settled reading obtained → don't reconcile this match again.
+                try:
+                    await self.redis.set(f"live:reconciled:{m['id']}", "1", ex=86400)
+                except Exception:
+                    pass
+                if int(hs) == int(m["hs"]) and int(as_) == int(m["as_"]):
+                    continue
+                await s.execute(
+                    text("""UPDATE matches
+                            SET home_score = :hs, away_score = :as_,
+                                home_pens = COALESCE(:hp, home_pens),
+                                away_pens = COALESCE(:ap, away_pens), time_elapsed = 'FT'
+                            WHERE id = :id AND finished = true"""),
+                    {"hs": int(hs), "as_": int(as_),
+                     "hp": r.get("home_pens"), "ap": r.get("away_pens"), "id": m["id"]},
+                )
+                changed = True
+                log.warning("live_tracker: reconcile corrected match %s from %s-%s to %s-%s "
+                            "(late goal missed at commit)", m["id"], m["hs"], m["as_"], int(hs), int(as_))
+            if changed:
+                await self._recompute_standings(s)
+                await self._resolve_bracket(s)
+                await self._rescore(s)
+            await s.commit()
 
     async def _match_context(self, m: dict) -> str:
         """Known-state block injected into the AI poll so each tick builds on the
