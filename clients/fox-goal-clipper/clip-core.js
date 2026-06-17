@@ -73,12 +73,16 @@ export async function downloadBestClip(tweetId, fetchImpl = fetch) {
 export async function classifyGoal(text, apiKey, model = "gemini-flash-latest", fetchImpl = fetch) {
   const mdl = (model && String(model).trim()) || "gemini-flash-latest";
   const prompt =
-    "You are classifying a social-media post from a football (soccer) account during " +
-    "the 2026 FIFA World Cup. Decide whether the post is announcing that a GOAL was JUST " +
-    "scored in a live match. It is NOT a goal post if it is a fixture preview, a lineup, a " +
-    "near-miss/chance, a save, a card, a full-time recap of a finished match, general news, " +
-    "or commentary. If it is a goal, extract the teams, the score AFTER the goal, the scorer, " +
-    "and the minute when present. Respond with strict JSON only.\n\nPOST TEXT:\n" + (text || "");
+    "You are classifying a VIDEO post from a football (soccer) account during the 2026 FIFA " +
+    "World Cup. The video is a GOAL clip if it shows or celebrates a goal (or goals) being " +
+    "scored. Treat ALL of these as goals: 'GOAL', 'scores', 'what a strike/finish/header', " +
+    "'golazo', 'bags a brace', 'hat-trick', a scorer's name celebrating, or a montage of a " +
+    "player's goals. It is NOT a goal clip ONLY if it is clearly about something else: a save, " +
+    "a miss or chance, a yellow/red card, a penalty miss, a preview/lineup/prediction, an " +
+    "interview, a crowd/stadium shot, or general promo. If it plausibly shows a goal, answer " +
+    "is_goal=true (a stray non-goal clip is acceptable). When present, extract the teams, the " +
+    "score after the goal, the scorer, and the minute (leave blank if not stated). Respond with " +
+    "strict JSON only.\n\nPOST TEXT:\n" + (text || "");
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],

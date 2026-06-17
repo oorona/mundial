@@ -618,6 +618,7 @@ class LiveTracker(commands.Cog):
             confirmed = {_dec(x) for x in (await self.redis.smembers(gkey) or set())}
             if not confirmed:
                 continue
+            match_has_goal = (m["hs"] or 0) + (m["as_"] or 0) > 0
             for raw in raws:
                 try:
                     c = json.loads(_dec(raw))
@@ -625,17 +626,28 @@ class LiveTracker(commands.Cog):
                     await self.redis.lrem(rkey, 1, raw)
                     continue
                 hs, as_ = c.get("home_score"), c.get("away_score")
-                if hs is None or as_ is None or _sl(hs, as_) not in confirmed:
-                    continue  # not (yet) a confirmed goal scoreline
-                await self.redis.lrem(rkey, 1, raw)
-                # If the goal was already announced (text-only, or an earlier clip), this
-                # one is a replay — label it as such so the clip's goal is unambiguous.
-                replay = await self._was_announced(mid, hs, as_)
-                await self._consume_pending_goal(mid, {hs, as_})
-                goal = {"match_id": mid, "home": m["home"], "away": m["away"], "etype": "goal",
-                        "ev": {"player": c.get("scorer"), "minute": c.get("minute")},
-                        "hs": hs, "as_": as_}
-                await self._publish_and_announce_goal(settings_rows, goal, c, replay=replay)
+                if hs is not None and as_ is not None:
+                    if _sl(hs, as_) not in confirmed:
+                        continue  # wrong/unconfirmed scoreline → wait for the right goal
+                    await self.redis.lrem(rkey, 1, raw)
+                    # Already announced (text-only / earlier clip)? → label this one a replay.
+                    replay = await self._was_announced(mid, hs, as_)
+                    await self._consume_pending_goal(mid, {hs, as_})
+                    goal = {"match_id": mid, "home": m["home"], "away": m["away"], "etype": "goal",
+                            "ev": {"player": c.get("scorer"), "minute": c.get("minute")},
+                            "hs": hs, "as_": as_}
+                    await self._publish_and_announce_goal(settings_rows, goal, c, replay=replay)
+                else:
+                    # No scoreline in the clip (e.g. a 'brace'/celebration post). Can't tie it
+                    # to a specific goal, so post it once — only once the match actually has a
+                    # goal — attributed by scorer, with no false scoreline precision.
+                    if not match_has_goal:
+                        continue
+                    await self.redis.lrem(rkey, 1, raw)
+                    goal = {"match_id": mid, "home": m["home"], "away": m["away"], "etype": "goal",
+                            "ev": {"player": c.get("scorer"), "minute": c.get("minute")},
+                            "hs": None, "as_": None}
+                    await self._publish_and_announce_goal(settings_rows, goal, c, replay=False)
 
     async def _consume_pending_goal(self, mid: int, score_set: set):
         """Drop a pending goal for this match whose score matches, so a clip posted via the
@@ -745,7 +757,11 @@ class LiveTracker(commands.Cog):
             detail += f" ({minute}')" if minute[:1].isdigit() and not minute.endswith("'") else f" ({minute})"
         hs, as_ = goal.get("hs"), goal.get("as_")
         score = f"{hs}–{as_}" if hs is not None and as_ is not None else "vs"
-        if replay:
+        if hs is None or as_ is None:
+            # Clip with no parsed scoreline (brace/celebration post) → label by scorer;
+            # the clip itself shows the goal. No invented scoreline.
+            msg = f"⚽ ¡GOL!{detail} · {home} vs {away}"
+        elif replay:
             # Late clip of an already-announced goal — label it a replay, with the
             # scoreline so there's no confusion about which goal it is.
             msg = f"🎥 Repetición del gol · **{home} {score} {away}**{detail}"
