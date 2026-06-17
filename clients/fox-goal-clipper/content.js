@@ -15,6 +15,25 @@
   const SEEN = new Set(); // in-tab dedup (the background worker dedups durably too)
   let cfg = { handle: "", refreshSeconds: 90, reloadSeconds: 300, maxAgeMinutes: 15 };
   let timersStarted = false;
+  let observer = null;
+
+  // After the extension is reloaded/updated, an already-open tab keeps running this
+  // (now orphaned) script; chrome.* calls then throw "Extension context invalidated".
+  // Detect that, stop cleanly, and never spew errors — a tab reload injects a fresh one.
+  function alive() {
+    return !!(chrome.runtime && chrome.runtime.id);
+  }
+  function stop() {
+    try { observer && observer.disconnect(); } catch (_) {}
+  }
+  function send(msg) {
+    if (!alive()) return stop();
+    try {
+      chrome.runtime.sendMessage(msg);
+    } catch (_) {
+      stop();
+    }
+  }
 
   function applyCfg(c) {
     cfg.handle = String(c.handle || "").trim().replace(/^@/, "").toLowerCase();
@@ -27,6 +46,7 @@
   }
 
   function scan() {
+    if (!alive()) return stop();
     let found = 0;
     for (const art of document.querySelectorAll("article")) {
       if (art.dataset.fgcSeen) continue;
@@ -57,9 +77,9 @@
       found++;
       const textEl = art.querySelector('[data-testid="tweetText"]');
       const text = textEl ? textEl.innerText : "";
-      chrome.runtime.sendMessage({ type: "fgc_candidate", tweetId, handle, text });
+      send({ type: "fgc_candidate", tweetId, handle, text });
     }
-    if (found) chrome.runtime.sendMessage({ type: "fgc_scan", found });
+    if (found) send({ type: "fgc_scan", found });
   }
 
   // X buffers new profile posts behind a button like "Show 3 posts" — click it to pull
@@ -94,7 +114,8 @@
       t = setTimeout(scan, 400);
     };
   })();
-  new MutationObserver(debounced).observe(document.documentElement, { childList: true, subtree: true });
+  observer = new MutationObserver(debounced);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
   debounced();
 
   chrome.storage.local.get(["handle", "refreshSeconds", "reloadSeconds", "maxAgeMinutes"], (c) => {

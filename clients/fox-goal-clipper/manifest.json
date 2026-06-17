@@ -1,9 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Fox Goal Clipper — Mundial 2026",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Watches the configured Fox account on x.com, keeps the video posts an LLM classifies as goals, and uploads the clip to the Mundial server (which posts it instead of a gif).",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
@@ -12,15 +14,29 @@
     "https://video.twimg.com/*",
     "https://generativelanguage.googleapis.com/*"
   ],
-  "optional_host_permissions": ["https://*/*", "http://*/*"],
-  "background": { "service_worker": "background.js", "type": "module" },
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
   "content_scripts": [
     {
-      "matches": ["https://x.com/*", "https://twitter.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "options_page": "options.html",
-  "action": { "default_title": "Fox Goal Clipper — activity log", "default_popup": "popup.html" }
+  "action": {
+    "default_title": "Fox Goal Clipper — activity log",
+    "default_popup": "popup.html"
+  }
 }
