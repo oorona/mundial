@@ -478,7 +478,11 @@ class LiveTracker(commands.Cog):
             return
         try:
             await self._drain_incoming_clips()
-            await self._pair_pending_goals()
+            async with self.db.worker_session() as s:
+                settings_rows = (await s.execute(
+                    text("SELECT guild_id, settings_json FROM guild_settings"))).all()
+            await self._pair_pending_goals(settings_rows)
+            await self._post_ripe_clips(settings_rows)
         except Exception as e:
             log.warning("live_tracker: clip pump failed: %r", e)
 
@@ -510,6 +514,8 @@ class LiveTracker(commands.Cog):
                     "home_score": clip.get("home_score"), "away_score": clip.get("away_score"),
                     "scorer": clip.get("scorer"), "minute": clip.get("minute")}))
                 await self.redis.expire(f"goal_clips:ready:{mid}", 3 * 3600)
+                await self.redis.sadd("goal_clips:ready_index", str(mid))
+                await self.redis.expire("goal_clips:ready_index", 3 * 3600)
             else:
                 att = int(clip.get("_attempts", 0)) + 1
                 if att <= 8:
@@ -541,16 +547,13 @@ class LiveTracker(commands.Cog):
                 best, best_score = m["id"], score
         return best if best_score >= 1 else None
 
-    async def _pair_pending_goals(self):
+    async def _pair_pending_goals(self, settings_rows):
         """For each match with queued goals, announce the oldest as soon as its clip is
         ready, or text-only once it has waited CLIP_TIMEOUT. FIFO keeps goals in order."""
         idx = await self.redis.smembers("live:pending_goal_index")
         match_ids = [int(_dec(x)) for x in idx] if idx else []
         if not match_ids:
             return
-        async with self.db.worker_session() as s:
-            settings_rows = (await s.execute(
-                text("SELECT guild_id, settings_json FROM guild_settings"))).all()
         now = int(time.time())
         for mid in match_ids:
             pkey = f"live:pending_goal:{mid}"
@@ -574,6 +577,66 @@ class LiveTracker(commands.Cog):
                     await self._announce_goal(settings_rows, goal)
                     continue
                 break  # head still waiting for its clip and not yet timed out (FIFO)
+
+    async def _post_ripe_clips(self, settings_rows):
+        """Post any ready clip whose scoreline matches its match's CURRENT live score —
+        the live score IS the stream confirmation, so this catches clips that arrive after
+        the pending-goal window closed (the timing race) or when the AI only moved the
+        score without emitting a discrete goal event. Without this, a correct clip can sit
+        unpaired forever. A matching pending goal (if any) is consumed so it isn't ALSO
+        announced text-only."""
+        idx = await self.redis.smembers("goal_clips:ready_index")
+        mids = [int(_dec(x)) for x in idx] if idx else []
+        if not mids:
+            return
+        async with self.db.worker_session() as s:
+            rows = (await s.execute(text("""
+                SELECT m.id AS id, m.home_score AS hs, m.away_score AS as_,
+                       ht.name_en AS home, at.name_en AS away
+                FROM matches m JOIN teams ht ON ht.id=m.home_team_id JOIN teams at ON at.id=m.away_team_id
+                WHERE m.id = ANY(:ids)"""), {"ids": mids})).mappings().all()
+        cur = {r["id"]: dict(r) for r in rows}
+        for mid in mids:
+            rkey = f"goal_clips:ready:{mid}"
+            raws = await self.redis.lrange(rkey, 0, -1)
+            if not raws:
+                await self.redis.srem("goal_clips:ready_index", str(mid))
+                continue
+            m = cur.get(mid)
+            if not m or m["hs"] is None:
+                continue
+            match_set = {m["hs"], m["as_"]}
+            for raw in raws:
+                try:
+                    c = json.loads(_dec(raw))
+                except Exception:
+                    await self.redis.lrem(rkey, 1, raw)
+                    continue
+                cs = {c.get("home_score"), c.get("away_score")}
+                if None in cs or cs != match_set:
+                    continue  # live score doesn't corroborate this clip yet
+                await self.redis.lrem(rkey, 1, raw)
+                await self._consume_pending_goal(mid, match_set)
+                goal = {"match_id": mid, "home": m["home"], "away": m["away"], "etype": "goal",
+                        "ev": {"player": c.get("scorer"), "minute": c.get("minute")},
+                        "hs": m["hs"], "as_": m["as_"]}
+                await self._publish_and_announce_goal(settings_rows, goal, c)
+
+    async def _consume_pending_goal(self, mid: int, score_set: set):
+        """Drop a pending goal for this match whose score matches, so a clip posted via the
+        live-score path doesn't also get announced text-only by the timeout path."""
+        pkey = f"live:pending_goal:{mid}"
+        try:
+            for raw in await self.redis.lrange(pkey, 0, -1):
+                try:
+                    g = json.loads(_dec(raw))
+                except Exception:
+                    continue
+                if {g.get("hs"), g.get("as_")} == score_set:
+                    await self.redis.lrem(pkey, 1, raw)
+                    return
+        except Exception:
+            pass
 
     async def _take_ready_clip(self, mid: int, goal: dict):
         """Pop a ready clip for this match — preferring one whose score matches the goal,
@@ -633,17 +696,25 @@ class LiveTracker(commands.Cog):
         home, away = goal["home"], goal["away"]
         ev = goal.get("ev") or {}
         etype = goal.get("etype") or "goal"
-        scorer = _team_name(ev, home, away)
-        if etype == "own_goal":
-            # an own goal counts FOR the opposing side
-            scorer = away if scorer == home else home if scorer == away else scorer
-        other = away if scorer == home else home
         player = str(ev.get("player") or "").strip()
         minute = str(ev.get("minute") or "").strip()
         detail = f" — {player}" if player else ""
         if minute:
             detail += f" ({minute}')" if minute[:1].isdigit() and not minute.endswith("'") else f" ({minute})"
-        msg = f"⚽ ¡GOOOL de **{scorer or home}** contra **{other}**!{detail}"
+        if str(ev.get("team") or "").strip():
+            # The stream told us which side scored → "GOOOL de X contra Y".
+            scorer = _team_name(ev, home, away)
+            if etype == "own_goal":
+                # an own goal counts FOR the opposing side
+                scorer = away if scorer == home else home if scorer == away else scorer
+            other = away if scorer == home else home
+            msg = f"⚽ ¡GOOOL de **{scorer or home}** contra **{other}**!{detail}"
+        else:
+            # Clip-driven post (scoring side unknown, corroborated by the live score) →
+            # announce the scoreline + scorer instead of guessing which team scored.
+            hs, as_ = goal.get("hs"), goal.get("as_")
+            score = f"{hs}–{as_}" if hs is not None and as_ is not None else "vs"
+            msg = f"⚽ ¡GOOOL! **{home} {score} {away}**{detail}"
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
             if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):

@@ -50,9 +50,13 @@
     let found = 0;
     for (const art of document.querySelectorAll("article")) {
       if (art.dataset.fgcSeen) continue;
-      const link =
-        art.querySelector('a[href*="/status/"]:has(time)') ||
-        art.querySelector('a[href*="/status/"]');
+      // The tweet's own permalink wraps the timestamp; find the status link that
+      // contains a <time>, else the first one. (No :has() — older Chrome throws on it.)
+      let link = null;
+      for (const a of art.querySelectorAll('a[href*="/status/"]')) {
+        if (a.querySelector("time")) { link = a; break; }
+      }
+      if (!link) link = art.querySelector('a[href*="/status/"]');
       const m = link && link.getAttribute("href").match(/^\/([^/]+)\/status\/(\d+)/);
       if (!m) continue;
       const handle = m[1].toLowerCase();
@@ -95,9 +99,27 @@
     return false;
   }
 
+  // Heartbeat: report "I'm alive and watching" + how many video posts (and how many
+  // from the monitored handle) are on the page right now. Drives the popup status line
+  // so it's always obvious the extension is running — even when there are no goals.
+  function heartbeat() {
+    if (!alive()) return stop();
+    let videos = 0, mine = 0;
+    for (const art of document.querySelectorAll("article")) {
+      if (!art.querySelector('[data-testid="videoComponent"], [data-testid="videoPlayer"], video')) continue;
+      videos++;
+      const l = art.querySelector('a[href*="/status/"]');
+      const mm = l && l.getAttribute("href").match(/^\/([^/]+)\/status\/(\d+)/);
+      if (mm && (!cfg.handle || mm[1].toLowerCase() === cfg.handle)) mine++;
+    }
+    send({ type: "fgc_heartbeat", handle: cfg.handle, url: location.pathname, videos, mine });
+  }
+
   function startTimers() {
     if (timersStarted) return;
     timersStarted = true;
+    heartbeat();
+    setInterval(heartbeat, 30000);
     if (cfg.refreshSeconds > 0) {
       setInterval(() => clickNewPostsPill(), Math.max(15, cfg.refreshSeconds) * 1000);
     }

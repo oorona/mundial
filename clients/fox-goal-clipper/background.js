@@ -19,7 +19,12 @@ chrome.runtime.onMessage.addListener((msg) => {
     handleCandidate(msg).catch((e) => logEvent(msg.tweetId, "error", false, String(e)));
   } else if (msg && msg.type === "fgc_scan") {
     // content.js reports each sweep so the log shows the watcher is alive.
-    if (msg.found) logEvent("", "scan", true, `${msg.found} video post(s) on page`);
+    if (msg.found) logEvent("", "scan", true, `${msg.found} new video post(s) detected`);
+  } else if (msg && msg.type === "fgc_heartbeat") {
+    // Live "still watching" status (not a log entry — shown at the top of the popup).
+    chrome.storage.local.set({
+      status: { ts: Date.now(), handle: msg.handle, url: msg.url, videos: msg.videos, mine: msg.mine },
+    });
   }
 });
 
@@ -86,8 +91,9 @@ async function handleCandidate({ tweetId, handle, text }) {
     await markProcessed(tweetId);
     return;
   }
-  logEvent(tweetId, "classify", true,
-    `GOAL ${verdict.home_team || "?"} ${verdict.home_score ?? "?"}-${verdict.away_score ?? "?"} ${verdict.away_team || "?"} (conf ${conf.toFixed(2)})`);
+  logEvent(tweetId, "GOAL", true,
+    `⚽ GOAL DETECTED — ${verdict.home_team || "?"} ${verdict.home_score ?? "?"}-${verdict.away_score ?? "?"} ${verdict.away_team || "?"}`
+    + (verdict.scorer ? `, ${verdict.scorer}` : "") + ` (conf ${conf.toFixed(2)})`);
 
   // 3. download
   let clip;
