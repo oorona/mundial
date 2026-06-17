@@ -1,6 +1,6 @@
 // options.js — load/save config and request host permission for the server origin.
 
-const FIELDS = ["serverUrl", "uploadKey", "llmApiKey", "llmModel", "handle", "threshold", "refreshSeconds", "reloadSeconds"];
+const FIELDS = ["serverUrl", "uploadKey", "llmApiKey", "llmModel", "handle", "threshold", "refreshSeconds", "reloadSeconds", "maxAgeMinutes"];
 
 function $(id) {
   return document.getElementById(id);
@@ -22,6 +22,7 @@ chrome.storage.local.get(FIELDS, (cfg) => {
   if (!$("threshold").value) $("threshold").value = "0.6";
   if (!$("refreshSeconds").value) $("refreshSeconds").value = "90";
   if (!$("reloadSeconds").value) $("reloadSeconds").value = "300";
+  if (!$("maxAgeMinutes").value) $("maxAgeMinutes").value = "15";
 });
 
 $("save").addEventListener("click", async () => {

@@ -58,6 +58,11 @@
     <span class="hint">Backstop: reloads the tab so nothing is missed if the pill is absent. 0 = off.</span>
   </label>
 
+  <label>Only consider posts newer than (min)
+    <input id="maxAgeMinutes" type="number" step="5" min="1" placeholder="15" />
+    <span class="hint">Ignores the backlog of old posts on load/reload — only classifies recent posts (the current match). Lower = safer against stale clips.</span>
+  </label>
+
   <button id="save">Save</button>
   <div id="status"></div>
 

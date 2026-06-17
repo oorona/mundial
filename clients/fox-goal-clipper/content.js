@@ -13,15 +13,17 @@
 
 (() => {
   const SEEN = new Set(); // in-tab dedup (the background worker dedups durably too)
-  let cfg = { handle: "", refreshSeconds: 90, reloadSeconds: 300 };
+  let cfg = { handle: "", refreshSeconds: 90, reloadSeconds: 300, maxAgeMinutes: 15 };
   let timersStarted = false;
 
   function applyCfg(c) {
     cfg.handle = String(c.handle || "").trim().replace(/^@/, "").toLowerCase();
     const r = Number(c.refreshSeconds);
     const rl = Number(c.reloadSeconds);
+    const ma = Number(c.maxAgeMinutes);
     if (!Number.isNaN(r)) cfg.refreshSeconds = r;
     if (!Number.isNaN(rl)) cfg.reloadSeconds = rl;
+    if (!Number.isNaN(ma)) cfg.maxAgeMinutes = ma;
   }
 
   function scan() {
@@ -40,6 +42,15 @@
         '[data-testid="videoComponent"], [data-testid="videoPlayer"], video'
       );
       if (!hasVideo) continue;
+      // Age gate: skip posts older than maxAgeMinutes so we never classify the backlog
+      // of old videos on load/reload, and never upload a stale goal that could mis-pair
+      // with a current live match. Posts with no timestamp fall through (processed once).
+      const timeEl = art.querySelector("time[datetime]");
+      const posted = timeEl ? Date.parse(timeEl.getAttribute("datetime")) : NaN;
+      if (!Number.isNaN(posted) && Date.now() - posted > cfg.maxAgeMinutes * 60000) {
+        art.dataset.fgcSeen = "1";
+        continue;
+      }
       art.dataset.fgcSeen = "1";
       if (SEEN.has(tweetId)) continue;
       SEEN.add(tweetId);
@@ -86,7 +97,7 @@
   new MutationObserver(debounced).observe(document.documentElement, { childList: true, subtree: true });
   debounced();
 
-  chrome.storage.local.get(["handle", "refreshSeconds", "reloadSeconds"], (c) => {
+  chrome.storage.local.get(["handle", "refreshSeconds", "reloadSeconds", "maxAgeMinutes"], (c) => {
     applyCfg(c);
     startTimers();
   });
