@@ -1,25 +1,41 @@
-// background.js — service worker.
+// background.js — MV3 service worker (ES module).
 //
-// Pipeline per candidate (from content.js):
+// Per candidate (from content.js):
 //   1. dedup (durable, chrome.storage.local)
-//   2. LLM goal check on the post TEXT (client-side, Gemini) — false positives are OK
-//   3. if goal: fetch the tweet's mp4 variant (Twitter syndication API), preferring
-//      one <= 8 MB so Discord can upload it natively
+//   2. LLM goal check on the post TEXT (Gemini) — false positives are OK
+//   3. if goal: download the mp4 variant (Twitter syndication API, prefers <= 8 MB)
 //   4. POST the clip + parsed metadata to the Mundial server's /goal-clips/ingest
 //
-// The server holds the clip until the live tracker confirms that goal on the stream,
-// then posts the clip instead of a gif. No human approval — this is fully automatic.
+// Every decision is written to a viewable log (chrome.storage.local 'log'), shown in the
+// toolbar popup, so you can see exactly what the extension did with each post.
 
-const DISCORD_MAX = 8 * 1024 * 1024; // prefer a variant Discord can upload natively
+import { downloadBestClip, classifyGoal } from "./clip-core.js";
+
 const PROCESSED_CAP = 800;
+const LOG_CAP = 200;
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "fgc_candidate") {
-    handleCandidate(msg).catch((e) => console.warn("[fgc] candidate failed", e));
+    handleCandidate(msg).catch((e) => logEvent(msg.tweetId, "error", false, String(e)));
+  } else if (msg && msg.type === "fgc_scan") {
+    // content.js reports each sweep so the log shows the watcher is alive.
+    if (msg.found) logEvent("", "scan", true, `${msg.found} video post(s) on page`);
   }
-  // no async response needed
 });
 
+// ── Decision log ────────────────────────────────────────────────────────────────
+async function logEvent(tweetId, stage, ok, detail) {
+  const entry = { ts: Date.now(), tweetId: tweetId || "", stage, ok: !!ok, detail: detail || "" };
+  console.log(`[fgc] ${stage} ${ok ? "OK" : "—"} ${tweetId ? "tweet=" + tweetId : ""} ${detail || ""}`);
+  try {
+    const { log = [] } = await chrome.storage.local.get("log");
+    log.unshift(entry);
+    while (log.length > LOG_CAP) log.pop();
+    await chrome.storage.local.set({ log });
+  } catch (_) {}
+}
+
+// ── Config + dedup ──────────────────────────────────────────────────────────────
 async function getConfig() {
   return await chrome.storage.local.get([
     "serverUrl", "uploadKey", "llmApiKey", "llmModel", "handle", "threshold",
@@ -40,162 +56,69 @@ async function markProcessed(id) {
   }
 }
 
+// ── Pipeline ────────────────────────────────────────────────────────────────────
 async function handleCandidate({ tweetId, handle, text }) {
   const cfg = await getConfig();
   if (!cfg.serverUrl || !cfg.uploadKey || !cfg.llmApiKey) {
-    console.warn("[fgc] not configured — open the extension Options");
+    logEvent(tweetId, "skip", false, "not configured — open Options");
     return;
   }
   const wantHandle = String(cfg.handle || "").replace(/^@/, "").toLowerCase();
-  if (wantHandle && handle !== wantHandle) return;
-  if (await alreadyProcessed(tweetId)) return;
-
-  // 2. classify the text
-  const verdict = await classifyGoal(text, cfg.llmApiKey, cfg.llmModel);
-  const threshold = Number(cfg.threshold ?? 0.6);
-  if (!verdict || !verdict.is_goal || Number(verdict.confidence ?? 0) < threshold) {
-    await markProcessed(tweetId); // not a goal — don't look at it again
+  if (wantHandle && handle !== wantHandle) {
+    logEvent(tweetId, "skip", false, `handle @${handle} != @${wantHandle}`);
     return;
   }
+  if (await alreadyProcessed(tweetId)) return; // already decided; no log noise
 
-  // 3. fetch the clip
-  const clip = await fetchClip(tweetId);
-  if (!clip) {
-    console.warn("[fgc] no mp4 variant for tweet", tweetId, "(HLS-only or syndication miss) — skipping");
+  // 2. classify
+  let verdict;
+  try {
+    verdict = await classifyGoal(text, cfg.llmApiKey, cfg.llmModel);
+  } catch (e) {
+    logEvent(tweetId, "classify", false, "LLM error: " + e.message + " (will retry)");
+    return; // leave UN-marked so a later rescan retries
+  }
+  const threshold = Number(cfg.threshold ?? 0.6);
+  const conf = Number(verdict?.confidence ?? 0);
+  if (!verdict || !verdict.is_goal || conf < threshold) {
+    logEvent(tweetId, "classify", false,
+      `not a goal (is_goal=${verdict?.is_goal}, conf=${conf.toFixed(2)}) — "${(text || "").slice(0, 60)}"`);
     await markProcessed(tweetId);
     return;
   }
+  logEvent(tweetId, "classify", true,
+    `GOAL ${verdict.home_team || "?"} ${verdict.home_score ?? "?"}-${verdict.away_score ?? "?"} ${verdict.away_team || "?"} (conf ${conf.toFixed(2)})`);
+
+  // 3. download
+  let clip;
+  try {
+    clip = await downloadBestClip(tweetId);
+  } catch (e) {
+    logEvent(tweetId, "download", false, "error: " + e.message + " (will retry)");
+    return;
+  }
+  if (!clip || !clip.blob) {
+    logEvent(tweetId, "download", false, "no mp4 variant (HLS-only?) — skipped");
+    await markProcessed(tweetId);
+    return;
+  }
+  logEvent(tweetId, "download", true, `${(clip.bytes / 1048576).toFixed(2)} MB, ${clip.variants} variant(s)`);
 
   // 4. upload
   try {
-    await uploadClip(cfg.serverUrl, cfg.uploadKey, tweetId, handle, text, verdict, clip);
-    console.log("[fgc] uploaded goal clip", tweetId, verdict);
+    const res = await uploadClip(cfg.serverUrl, cfg.uploadKey, tweetId, handle, text, verdict, clip.blob);
+    logEvent(tweetId, "upload", true, res?.duplicate ? "server already had it" : `uploaded → clip id ${res?.id}`);
   } catch (e) {
-    console.warn("[fgc] upload failed", tweetId, e);
-    // leave UN-marked so a later rescan can retry the upload
-    return;
+    logEvent(tweetId, "upload", false, e.message + " (will retry)");
+    return; // leave UN-marked so a later rescan retries
   }
   await markProcessed(tweetId);
 }
 
-// ── LLM goal classifier (Gemini generateContent, structured JSON) ────────────────
-async function classifyGoal(text, apiKey, model) {
-  const mdl = (model && model.trim()) || "gemini-flash-latest";
-  const prompt =
-    "You are classifying a social-media post from a football (soccer) account during " +
-    "the 2026 FIFA World Cup. Decide whether the post is announcing that a GOAL was JUST " +
-    "scored in a live match. It is NOT a goal post if it is a fixture preview, a lineup, a " +
-    "near-miss/chance, a save, a card, a full-time recap of a finished match, general news, " +
-    "or commentary. If it is a goal, extract the teams, the score AFTER the goal, the scorer, " +
-    "and the minute when present. Respond with strict JSON only.\n\nPOST TEXT:\n" + (text || "");
-
-  const body = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "object",
-        properties: {
-          is_goal: { type: "boolean" },
-          home_team: { type: "string" },
-          away_team: { type: "string" },
-          home_score: { type: "integer" },
-          away_score: { type: "integer" },
-          scorer: { type: "string" },
-          minute: { type: "string" },
-          confidence: { type: "number" },
-        },
-        required: ["is_goal", "confidence"],
-      },
-    },
-  };
-
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(mdl)}:generateContent?key=` +
-    encodeURIComponent(apiKey);
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      console.warn("[fgc] gemini http", resp.status, await resp.text());
-      return null;
-    }
-    const data = await resp.json();
-    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    console.warn("[fgc] gemini error", e);
-    return null;
-  }
-}
-
-// ── Clip download (Twitter syndication API → mp4 variant) ────────────────────────
-// react-tweet's token trick: a deterministic token derived from the tweet id lets the
-// public syndication endpoint return the tweet (incl. video variants) without auth.
-function synToken(id) {
-  return ((Number(id) / 1e15) * Math.PI).toString(36).replace(/(0+|\.)/g, "");
-}
-
-async function fetchClip(tweetId) {
-  const token = synToken(tweetId);
-  const url =
-    `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en&token=${token}`;
-  let json;
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    json = await r.json();
-  } catch (e) {
-    console.warn("[fgc] syndication fetch failed", e);
-    return null;
-  }
-
-  const media = json.mediaDetails || (json.video ? [json.video] : []);
-  let variants = [];
-  for (const md of media) {
-    const vs = md?.video_info?.variants || md?.variants || [];
-    for (const v of vs) {
-      if (v && v.url && (v.content_type === "video/mp4" || /\.mp4/.test(v.url))) {
-        variants.push({ url: v.url, bitrate: v.bitrate || 0 });
-      }
-    }
-  }
-  if (!variants.length) return null;
-  variants.sort((a, b) => b.bitrate - a.bitrate); // high → low
-
-  // Prefer the highest-quality variant that fits Discord's native upload limit.
-  for (const v of variants) {
-    let len = 0;
-    try {
-      const head = await fetch(v.url, { method: "HEAD" });
-      len = Number(head.headers.get("content-length") || 0);
-    } catch (_) {
-      len = 0;
-    }
-    if (len && len <= DISCORD_MAX) {
-      const blob = await (await fetch(v.url)).blob();
-      return { blob };
-    }
-  }
-  // None confirmed <= 8 MB (or HEAD unsupported) → take the smallest and let the
-  // server/Discord decide (web playback still works regardless of size).
-  const smallest = variants[variants.length - 1];
-  try {
-    const blob = await (await fetch(smallest.url)).blob();
-    return { blob };
-  } catch (e) {
-    return null;
-  }
-}
-
-// ── Upload to the Mundial server ────────────────────────────────────────────────
-async function uploadClip(serverUrl, uploadKey, tweetId, handle, text, verdict, clip) {
+async function uploadClip(serverUrl, uploadKey, tweetId, handle, text, verdict, blob) {
   const base = serverUrl.replace(/\/+$/, "");
   const fd = new FormData();
-  fd.append("video", clip.blob, `${tweetId}.mp4`);
+  fd.append("video", blob, `${tweetId}.mp4`);
   fd.append("tweet_id", tweetId);
   fd.append("tweet_url", `https://x.com/${handle}/status/${tweetId}`);
   fd.append("text", text || "");
@@ -212,8 +135,6 @@ async function uploadClip(serverUrl, uploadKey, tweetId, handle, text, verdict, 
     headers: { "X-Upload-Key": uploadKey },
     body: fd,
   });
-  if (!resp.ok) {
-    throw new Error(`ingest ${resp.status}: ${await resp.text()}`);
-  }
+  if (!resp.ok) throw new Error(`ingest ${resp.status}: ${await resp.text()}`);
   return await resp.json();
 }

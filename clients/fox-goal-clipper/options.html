@@ -48,6 +48,16 @@
     <span class="hint">Minimum LLM confidence to treat a post as a goal (0–1).</span>
   </label>
 
+  <label>Check for new posts every (sec)
+    <input id="refreshSeconds" type="number" step="5" min="0" placeholder="90" />
+    <span class="hint">Clicks X's "Show N posts" pill so new posts enter the page (keeps scroll). 0 = off.</span>
+  </label>
+
+  <label>Hard reload every (sec)
+    <input id="reloadSeconds" type="number" step="30" min="0" placeholder="300" />
+    <span class="hint">Backstop: reloads the tab so nothing is missed if the pill is absent. 0 = off.</span>
+  </label>
+
   <button id="save">Save</button>
   <div id="status"></div>
 

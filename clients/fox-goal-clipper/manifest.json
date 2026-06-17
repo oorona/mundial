@@ -13,7 +13,7 @@
     "https://generativelanguage.googleapis.com/*"
   ],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
-  "background": { "service_worker": "background.js" },
+  "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [
     {
       "matches": ["https://x.com/*", "https://twitter.com/*"],
@@ -22,5 +22,5 @@
     }
   ],
   "options_page": "options.html",
-  "action": { "default_title": "Fox Goal Clipper — open Options to configure" }
+  "action": { "default_title": "Fox Goal Clipper — activity log", "default_popup": "popup.html" }
 }
