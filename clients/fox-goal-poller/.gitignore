@@ -1,0 +1,5 @@
+# Local secrets / state — never commit
+config.json
+auth.json
+seen.json
+node_modules/

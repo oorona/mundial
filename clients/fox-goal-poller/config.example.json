@@ -1,0 +1,10 @@
+{
+  "serverUrl": "https://mundial.mexicodev.org",
+  "uploadKey": "PUT-THE-goal_clips_upload_key-HERE",
+  "llmApiKey": "PUT-YOUR-GEMINI-API-KEY-HERE",
+  "llmModel": "gemini-flash-latest",
+  "handles": ["FOXSports", "FOXSoccer", "FIFAWorldCup"],
+  "threshold": 0.6,
+  "maxAgeMinutes": 20,
+  "pollSeconds": 45
+}
