@@ -577,6 +577,18 @@ class LiveTracker(commands.Cog):
                      clip_id, is_goal, relevant, (src or "")[:80])
             await self._mark_clip(clip_id, "skipped")
             return
+        # Dedup near-identical reposts: Fox posts the same goal as several tweets (different
+        # tweet_ids, same/near text), so tweet-id dedup misses them. First clip of a given
+        # text signature wins for a few hours; later identical posts are dropped.
+        sig = re.sub(r"[^a-z0-9]+", "", (src or "").lower())[:120]
+        if sig:
+            try:
+                if not await self.redis.set(f"clips:textseen:{sig}", str(clip_id), nx=True, ex=3 * 3600):
+                    log.info("live_tracker: clip %s skipped — duplicate of an already-posted clip", clip_id)
+                    await self._mark_clip(clip_id, "duplicate")
+                    return
+            except Exception:
+                pass
         cap = f"🎥 {es}" if es else "🎥 ⚽"
         log.info("live_tracker: relaying clip %s — %r", clip_id, cap[:90])
         await self._mark_clip(clip_id, "posted")
