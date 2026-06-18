@@ -61,6 +61,18 @@ SCORE_SCHEMA = {
 # Registered in the editable llm_schemas store (LLM Configs → Schemas). Seeded on load,
 # loaded at run time; SCORE_SCHEMA above is the guarded fallback (used if the row is
 # missing or an edit dropped home_score/away_score).
+# Structured output for vetting + translating a Fox clip in one call (see _caption_for_clip):
+# is it a GOAL, is it about a live match, and the plain Spanish caption.
+CLIP_RELAY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_goal": {"type": "boolean"},
+        "relevant": {"type": "boolean"},
+        "es": {"type": "string"},
+    },
+    "required": ["is_goal", "relevant", "es"],
+}
+
 SCORE_SCHEMA_ID = "live_tracker_score"
 SCORE_SCHEMA_DOC = {
     "id": SCORE_SCHEMA_ID,
@@ -460,7 +472,7 @@ class LiveTracker(commands.Cog):
             v = await self.redis.rpop("goal_clips:incoming")
             if v is None:
                 return
-            in_window = bool(await self._read_inwindow())
+            live = await self._read_inwindow()  # live matches now (teams used to vet relevance)
             async with self.db.worker_session() as s:
                 settings_rows = (await s.execute(
                     text("SELECT guild_id, settings_json FROM guild_settings"))).all()
@@ -472,7 +484,7 @@ class LiveTracker(commands.Cog):
                 except Exception:
                     v = await self.redis.rpop("goal_clips:incoming")
                     continue
-                await self._relay_clip(settings_rows, clip, in_window)
+                await self._relay_clip(settings_rows, clip, live)
                 v = await self.redis.rpop("goal_clips:incoming")
         except Exception as e:
             log.warning("live_tracker: clip pump failed: %r", e)
@@ -481,53 +493,68 @@ class LiveTracker(commands.Cog):
     async def _before_pump(self):
         await self.bot.wait_until_ready()
 
-    async def _translate_caption(self, text_en: str) -> str:
-        """Translate a Fox post's English text to Spanish for the channel caption — just the
-        plain sentence: no links, no @mentions, no platform references. Returns the cleaned
-        original on any error/empty so a clip is never dropped over translation."""
-        src = text_en or ""
-        src = re.sub(r"https?://\S+", "", src)   # links (t.co share URL Fox appends, etc.)
-        src = re.sub(r"@\w+", "", src)           # @handles (X references)
+    async def _mark_clip(self, clip_id, status: str):
+        """Set a goal_clips row's status (and posted_at when 'posted'). Best-effort."""
+        try:
+            async with self.db.worker_session() as s:
+                await s.execute(text(
+                    "UPDATE goal_clips SET status=:st, "
+                    "posted_at=CASE WHEN :st='posted' THEN now() ELSE posted_at END "
+                    "WHERE id=:i"), {"st": status, "i": clip_id})
+                await s.commit()
+        except Exception:
+            pass
+
+    async def _caption_for_clip(self, text_en: str, live: list[dict]) -> tuple[bool, bool, str]:
+        """Vet a Fox clip against the currently-live match(es) AND translate it, in one call.
+
+        Returns (is_goal, relevant, caption). A clip posts only when it is BOTH about a goal
+        being scored AND about a team playing right now — the X stream is otherwise too noisy
+        (other games, nostalgia, memes, cards/VAR, fan-cams, studio talk). The caption is the
+        plain Spanish text: no links, no @mentions, no platform references. Fails CLOSED
+        (skip) on empty text or any LLM error — the web stream still announces the goal, so a
+        dropped bonus clip is cheap; a wrong clip is what the user wants gone."""
+        src = re.sub(r"https?://\S+", "", text_en or "")   # links (t.co etc.)
+        src = re.sub(r"@\w+", "", src)                      # @handles (X references)
         src = re.sub(r"\s+", " ", src).strip()
         if not src:
-            return ""
-        provider = self.llm.providers.get("google") if (self.llm and self.llm.providers) else None
-        if not provider:
-            return src
+            return (False, False, "")  # no text → can't vet → skip
+        matchups = "; ".join(f"{m.get('home_name')} vs {m.get('away_name')}" for m in (live or [])) or "(ninguno)"
+        sys = (
+            "Recibes el texto de una publicación de video de una cuenta de fútbol y la lista de "
+            "PARTIDOS EN VIVO ahora mismo. Devuelve dos banderas y una traducción:\n"
+            "• is_goal = true SOLO si el texto describe un GOL ANOTADO (marca, anota, golazo, "
+            "de cabeza, definición, doblete, hat-trick, o la repetición/jugada de ese gol). "
+            "Pon is_goal=false para atajadas, tiros fallados, gol ANULADO/VAR, tarjetas, "
+            "previas, entrevistas, reacciones de afición sin gol, o gráficos.\n"
+            "• relevant = true SOLO si trata de uno de los PARTIDOS EN VIVO listados (esos "
+            "equipos). Pon relevant=false si es de OTRO partido o equipos, de un torneo pasado o "
+            "nostalgia, de un meme/promoción/genérico, o de aficionados/estudio de otro juego.\n"
+            "• es = la traducción al español (es-MX) como frase simple: sin comillas, sin "
+            "enlaces, sin menciones (@), sin referencias a X/Twitter/Fox; conserva emojis y "
+            "nombres propios."
+        )
+        user = f"PARTIDOS EN VIVO AHORA: {matchups}\n\nTEXTO DE LA PUBLICACIÓN:\n{src}"
         try:
-            from services.llm import LLMMessage
-            sys = (
-                "Traduce al español (es-MX) el texto de una publicación de fútbol. "
-                "Devuelve ÚNICAMENTE la traducción como una frase simple, sin comillas ni "
-                "comentarios. NO incluyas enlaces, menciones (@) ni referencias a X, Twitter, "
-                "Fox u otra red/plataforma. Conserva los emojis y los nombres propios. "
-                "Si ya está en español, devuélvelo igual (también limpio)."
-            )
-            out = await provider.generate_response(
-                [LLMMessage(role="user", content=src)], system_prompt=sys)
-            out = out if isinstance(out, str) else json.dumps(out)
-            return out.strip() or src
+            data = await self.llm.generate_structured(user, CLIP_RELAY_SCHEMA, system_prompt=sys)
+            if isinstance(data, dict) and "is_goal" in data and "relevant" in data:
+                es = str(data.get("es") or "").strip() or src
+                return (bool(data["is_goal"]), bool(data["relevant"]), es)
         except Exception:
-            return src
+            pass
+        return (False, False, src)  # fail closed — don't post what we couldn't vet
 
-    async def _relay_clip(self, settings_rows, clip, in_window: bool):
+    async def _relay_clip(self, settings_rows, clip, live):
         """Post one uploaded Fox clip as a video with a Spanish caption to every enabled
-        guild's goal channel, and push it to the web feed. Independent of the web goal
-        stream — it relays whatever Fox showed. Gated to the live game window (a backstop;
-        the client already captures only during the window)."""
+        guild's goal channel, and push it to the web feed. Independent of the web goal stream.
+        Posts ONLY when the clip is about a goal AND about a team playing right now (the X
+        stream is otherwise too noisy). Out of window / off-topic / non-goal → dropped."""
         clip_id = clip.get("clip_id")
-        if not in_window:
+        if not live:
             # No game in window — drop it so an off-hours clip never posts.
-            try:
-                async with self.db.worker_session() as s:
-                    await s.execute(text("UPDATE goal_clips SET status='expired' WHERE id=:i"),
-                                    {"i": clip_id})
-                    await s.commit()
-            except Exception:
-                pass
+            await self._mark_clip(clip_id, "expired")
             return
-        file_path = None
-        row_text = ""
+        file_path, row_text = None, ""
         try:
             async with self.db.worker_session() as s:
                 row = (await s.execute(
@@ -535,20 +562,24 @@ class LiveTracker(commands.Cog):
                 if row:
                     file_path = row["file_path"]
                     row_text = row["text"] or ""
-                await s.execute(
-                    text("UPDATE goal_clips SET status='posted', posted_at=now() WHERE id=:i"),
-                    {"i": clip_id})
-                await s.commit()
         except Exception as e:
-            log.warning("live_tracker: clip lookup/mark failed for clip %s: %r", clip_id, e)
+            log.warning("live_tracker: clip lookup failed for clip %s: %r", clip_id, e)
         if not file_path or not os.path.exists(file_path):
             log.warning("live_tracker: clip %s file missing — skipping", clip_id)
+            await self._mark_clip(clip_id, "expired")
             return
-        # Prefer the text from the Redis payload; fall back to the goal_clips row (always
-        # populated at ingest) so a missing/older payload never yields an empty caption.
-        es = await self._translate_caption(clip.get("text") or row_text)
+        # Prefer the Redis payload text; fall back to the goal_clips row (always populated at
+        # ingest). Vet that it's a GOAL about a live team, and translate, in one LLM call.
+        src = clip.get("text") or row_text
+        is_goal, relevant, es = await self._caption_for_clip(src, live)
+        if not (is_goal and relevant):
+            log.info("live_tracker: clip %s skipped (is_goal=%s relevant=%s) — %r",
+                     clip_id, is_goal, relevant, (src or "")[:80])
+            await self._mark_clip(clip_id, "skipped")
+            return
         cap = f"🎥 {es}" if es else "🎥 ⚽"
         log.info("live_tracker: relaying clip %s — %r", clip_id, cap[:90])
+        await self._mark_clip(clip_id, "posted")
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
             if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
@@ -571,8 +602,10 @@ class LiveTracker(commands.Cog):
         is the sole goal decision-maker: it names the side that scored, the scorer + minute,
         and a running scoreline tallied in MINUTE order (so a goal surfaced out of order still
         shows its true score — never an impossible line). Dedup + restart-safety come from the
-        persisted live:seen:{mid} set and the goal budget upstream in _publish_live_events."""
-        for g in (new_goals or []):
+        persisted live:seen:{mid} set and the goal budget upstream in _publish_live_events.
+        Goals surfaced together in one tick are announced in MINUTE order (cross-tick lag,
+        where the AI indexes an early goal several ticks late, can't be reordered)."""
+        for g in sorted(new_goals or [], key=lambda x: _minute_sort_key(x.get("minute"))):
             home, away = g["home"], g["away"]
             is_home = str(g.get("team") or "").strip().lower() in ("home", "local")
             scoring_team = home if is_home else away
