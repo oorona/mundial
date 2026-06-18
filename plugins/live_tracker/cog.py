@@ -482,10 +482,13 @@ class LiveTracker(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _translate_caption(self, text_en: str) -> str:
-        """Translate a Fox post's English text to Spanish for the channel caption. Returns
-        the original text on any error/empty so a clip is never dropped over translation.
-        Strips the trailing t.co share URL Fox appends (noise in a Discord caption)."""
-        src = re.sub(r"\s*https?://\S+", "", (text_en or "")).strip()
+        """Translate a Fox post's English text to Spanish for the channel caption — just the
+        plain sentence: no links, no @mentions, no platform references. Returns the cleaned
+        original on any error/empty so a clip is never dropped over translation."""
+        src = text_en or ""
+        src = re.sub(r"https?://\S+", "", src)   # links (t.co share URL Fox appends, etc.)
+        src = re.sub(r"@\w+", "", src)           # @handles (X references)
+        src = re.sub(r"\s+", " ", src).strip()
         if not src:
             return ""
         provider = self.llm.providers.get("google") if (self.llm and self.llm.providers) else None
@@ -495,8 +498,10 @@ class LiveTracker(commands.Cog):
             from services.llm import LLMMessage
             sys = (
                 "Traduce al español (es-MX) el texto de una publicación de fútbol. "
-                "Devuelve ÚNICAMENTE la traducción, sin comillas ni comentarios, conservando "
-                "los emojis y los nombres propios. Si ya está en español, devuélvelo igual."
+                "Devuelve ÚNICAMENTE la traducción como una frase simple, sin comillas ni "
+                "comentarios. NO incluyas enlaces, menciones (@) ni referencias a X, Twitter, "
+                "Fox u otra red/plataforma. Conserva los emojis y los nombres propios. "
+                "Si ya está en español, devuélvelo igual (también limpio)."
             )
             out = await provider.generate_response(
                 [LLMMessage(role="user", content=src)], system_prompt=sys)
