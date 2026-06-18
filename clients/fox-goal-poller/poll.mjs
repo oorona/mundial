@@ -122,10 +122,10 @@ async function handlePost(p, handle) {
     return;
   }
 
-  // 1) found a fresh video post from the handle
-  log("video", true, p.id, `found video — "${text1.slice(0, 120)}"`);
+  // 1) found a fresh video post from the handle — show its FULL text
+  log("video", true, p.id, `found video — "${text1.slice(0, 500)}"`);
 
-  // 2) classify the text
+  // 2) classify the text — ALWAYS echo the text with the verdict so you can cross-check
   let v;
   try {
     v = await classifyGoal(p.text, cfg.llmApiKey, cfg.llmModel);
@@ -135,13 +135,15 @@ async function handlePost(p, handle) {
   }
   const conf = Number(v?.confidence ?? 0);
   if (!v || !v.is_goal || conf < threshold) {
-    log("classify", false, p.id, `NOT a goal (is_goal=${v?.is_goal}, conf=${conf.toFixed(2)})`);
+    log("classify", false, p.id,
+      `NOT a goal (is_goal=${v?.is_goal}, conf=${conf.toFixed(2)}) — TEXT: "${text1.slice(0, 500)}"`);
     markSeen(p.id);
     return;
   }
   log("GOAL", true, p.id,
     `GOAL ✓ ${v.home_team || "?"}${v.away_team ? " vs " + v.away_team : ""}` +
-    `${v.scorer ? " — " + v.scorer : ""} (conf ${conf.toFixed(2)})`);
+    `${v.scorer ? " — " + v.scorer : ""}${v.scoring_team ? " [scored: " + v.scoring_team + "]" : ""}` +
+    ` (conf ${conf.toFixed(2)}) — TEXT: "${text1.slice(0, 300)}"`);
 
   // 3) download the mp4
   let clip;
