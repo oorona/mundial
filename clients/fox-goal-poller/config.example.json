@@ -6,5 +6,6 @@
   "handles": ["FOXSports", "FOXSoccer", "FIFAWorldCup"],
   "threshold": 0.6,
   "maxAgeMinutes": 20,
-  "pollSeconds": 45
+  "pollSeconds": 45,
+  "idleSeconds": 300
 }

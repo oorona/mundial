@@ -23,6 +23,7 @@ const handles = (cfg.handles && cfg.handles.length ? cfg.handles : ["FOXSports"]
   String(h).replace(/^@/, "")
 );
 const pollMs = (Number(cfg.pollSeconds) || 45) * 1000;
+const idleMs = (Number(cfg.idleSeconds) || 300) * 1000; // how often to re-check when no game is on
 const maxAgeMs = (Number(cfg.maxAgeMinutes) || 20) * 60000;
 const threshold = Number(cfg.threshold ?? 0.6);
 const base = String(cfg.serverUrl || "").replace(/\/+$/, "");
@@ -69,6 +70,18 @@ async function uploadClip(tweetId, handle, text, verdict, blob) {
   });
   if (!resp.ok) throw new Error(`ingest ${resp.status}: ${await resp.text()}`);
   return await resp.json();
+}
+
+// Is a match in its play window right now? (server decides — same window the bot uses)
+async function isActive() {
+  try {
+    const r = await fetch(`${base}/api/v1/goal-clips/active`);
+    if (!r.ok) return true; // fail open — don't stop capturing on a server hiccup
+    const d = await r.json();
+    return !!d.active;
+  } catch (_) {
+    return true; // fail open
+  }
 }
 
 // ── read the visible posts on a profile (same selectors as content.js) ───────
@@ -163,7 +176,21 @@ async function handlePost(p, handle) {
   log("watching", true, "", `@${handles.join(", @")}`);
 
   let lastMirror = 0;
+  let wasIdle = false;
   for (;;) {
+    // Only work during a match window (+ buffer). Off-hours clips are ignored.
+    if (!(await isActive())) {
+      if (!wasIdle) {
+        console.log(`[fgp] ${new Date().toISOString().slice(11, 19)} idle — no match in play window; pausing scans`);
+        wasIdle = true;
+      }
+      await new Promise((r) => setTimeout(r, idleMs));
+      continue;
+    }
+    if (wasIdle) {
+      console.log(`[fgp] ${new Date().toISOString().slice(11, 19)} a match is live — resuming scans`);
+      wasIdle = false;
+    }
     for (const handle of handles) {
       try {
         const posts = await scrape(page, handle);

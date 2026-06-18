@@ -22,7 +22,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.redis import get_redis
@@ -163,6 +163,22 @@ async def debug_log(
     except Exception:
         pass
     return {"ok": True}
+
+
+@router.get("/active")
+async def active(db: AsyncSession = Depends(get_db)):
+    """Is a match currently in its live window (play time + buffer, same window the bot
+    accepts clips for)? The poller checks this so it ignores Fox clips posted off-hours
+    when no game is on. Public — it's just a boolean about the schedule."""
+    n = (await db.execute(text("""
+        SELECT count(*) FROM matches m
+        WHERE m.finished = false AND m.kickoff_at IS NOT NULL
+          AND m.kickoff_at <= now() + interval '5 minutes'
+          AND m.kickoff_at >= now() - (CASE WHEN m.type = 'group'
+                                            THEN interval '150 minutes'
+                                            ELSE interval '3 hours' END)
+    """))).scalar()
+    return {"active": bool(n), "matches": int(n or 0)}
 
 
 @router.get("/{clip_id}/video")
