@@ -81,8 +81,10 @@ export async function classifyGoal(text, apiKey, model = "gemini-flash-latest", 
     "a miss or chance, a yellow/red card, a penalty miss, a preview/lineup/prediction, an " +
     "interview, a crowd/stadium shot, or general promo. If it plausibly shows a goal, answer " +
     "is_goal=true (a stray non-goal clip is acceptable). When present, extract the teams, the " +
-    "score after the goal, the scorer, and the minute (leave blank if not stated). Respond with " +
-    "strict JSON only.\n\nPOST TEXT:\n" + (text || "");
+    "score after the goal, the scorer, and the minute (leave blank if not stated). IMPORTANT: " +
+    "set scoring_team to the name of the team that SCORED — the post usually makes it explicit " +
+    "(e.g. \"UZBEKISTAN'S goal\", \"scores for Colombia\") → use that team's name; leave it blank " +
+    "only if genuinely unclear. Respond with strict JSON only.\n\nPOST TEXT:\n" + (text || "");
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -97,6 +99,7 @@ export async function classifyGoal(text, apiKey, model = "gemini-flash-latest", 
           home_score: { type: "integer" },
           away_score: { type: "integer" },
           scorer: { type: "string" },
+          scoring_team: { type: "string" },
           minute: { type: "string" },
           confidence: { type: "number" },
         },

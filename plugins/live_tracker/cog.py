@@ -490,7 +490,8 @@ class LiveTracker(commands.Cog):
                 await self.redis.rpush(f"goal_clips:ready:{mid}", json.dumps({
                     "clip_id": clip.get("clip_id"),
                     "home_score": clip.get("home_score"), "away_score": clip.get("away_score"),
-                    "scorer": clip.get("scorer"), "minute": clip.get("minute")}))
+                    "scorer": clip.get("scorer"), "scoring_team": clip.get("scoring_team"),
+                    "minute": clip.get("minute")}))
                 await self.redis.expire(f"goal_clips:ready:{mid}", 3 * 3600)
                 await self.redis.sadd("goal_clips:ready_index", str(mid))
                 await self.redis.expire("goal_clips:ready_index", 3 * 3600)
@@ -548,37 +549,47 @@ class LiveTracker(commands.Cog):
                                    r["hs"] or 0, r["as_"] or 0, now)
 
     async def _sync_match(self, settings_rows, mid, home, away, H, A, now):
-        """Announce the goal when the web score rises (opening the clip window), then
-        release held clips while that window is open. The web stream owns the score; the
-        clip stream owns the video. Pairing is by TIME, not scoreline."""
-        total = H + A
-        ak = f"clips:announced_total:{mid}"
-        wk = f"clips:window_until:{mid}"
-        try:
-            prev = _dec(await self.redis.get(ak))
-        except Exception:
-            prev = None
-        if prev is None:
-            # First sight — record the current total WITHOUT announcing, so goals scored
-            # before we started (or before a restart) aren't replayed.
-            await self.redis.set(ak, total, ex=6 * 3600)
-        elif total > int(prev):
-            # Web stream confirmed a goal → announce once (reliable score) + open the window.
-            await self._announce_goal_text(settings_rows, home, away, H, A)
-            await self.redis.set(ak, total, ex=6 * 3600)
-            await self.redis.set(wk, now + self.CLIP_WINDOW, ex=6 * 3600)
-        try:
-            wu = _dec(await self.redis.get(wk))
-            wu = int(wu) if wu is not None else 0
-        except Exception:
-            wu = 0
-        if now < wu:
-            await self._flush_held_clips(settings_rows, mid, home, away)
+        """Per-TEAM sync. When the web score rises we announce the goal — naming the side
+        that scored (home vs away, which the web stream knows reliably) — and open a window
+        for THAT team. Held clips are released only for the team whose window is open,
+        matched by the clip's own scoring_team. So a clip can never be attached to the
+        other team's goal. Clips whose scoring team can't be determined fall back to time.
+        The web stream owns the score; the clip stream owns the video."""
+        hk, ak = f"clips:home_total:{mid}", f"clips:away_total:{mid}"
+        whk, wak = f"clips:win_home:{mid}", f"clips:win_away:{mid}"
 
-    async def _announce_goal_text(self, settings_rows, home, away, H, A):
-        """Post the goal announcement (web stream, authoritative score) once to every
-        enabled guild's goal channel, with the goal-ping role."""
-        msg = f"⚽ ¡GOOOL! **{home} {H}–{A} {away}**"
+        async def _get_int(k):
+            try:
+                v = _dec(await self.redis.get(k))
+                return int(v) if v is not None else None
+            except Exception:
+                return None
+
+        ph = await _get_int(hk)
+        if ph is None:
+            # First sight — record current scores WITHOUT announcing (don't replay history).
+            await self.redis.set(hk, H, ex=6 * 3600)
+            await self.redis.set(ak, A, ex=6 * 3600)
+        else:
+            pa = await _get_int(ak) or 0
+            if H > ph:  # home team scored
+                await self._announce_goal_text(settings_rows, home, away, H, A, home)
+                await self.redis.set(hk, H, ex=6 * 3600)
+                await self.redis.set(whk, now + self.CLIP_WINDOW, ex=6 * 3600)
+            if A > pa:  # away team scored
+                await self._announce_goal_text(settings_rows, home, away, H, A, away)
+                await self.redis.set(ak, A, ex=6 * 3600)
+                await self.redis.set(wak, now + self.CLIP_WINDOW, ex=6 * 3600)
+
+        home_open = now < ((await _get_int(whk)) or 0)
+        away_open = now < ((await _get_int(wak)) or 0)
+        if home_open or away_open:
+            await self._flush_held_clips(settings_rows, mid, home, away, home_open, away_open)
+
+    async def _announce_goal_text(self, settings_rows, home, away, H, A, scoring_team):
+        """Post the goal announcement once to every enabled guild's goal channel, naming
+        the team that scored and the authoritative web-stream score."""
+        msg = f"⚽ ¡GOOOL de **{scoring_team}**! · {home} {H}–{A} {away}"
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
             if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
@@ -595,22 +606,38 @@ class LiveTracker(commands.Cog):
             except discord.HTTPException as e:
                 log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
 
-    async def _flush_held_clips(self, settings_rows, mid, home, away):
-        """Post every clip currently held for this match (the window is open)."""
+    async def _flush_held_clips(self, settings_rows, mid, home, away, home_open, away_open):
+        """Release held clips whose scoring team's window is open. A clip is matched to a
+        side by its scoring_team; one with no usable scoring_team falls back to time-based
+        (released in any open window). Non-matching clips stay held for their own goal."""
         rkey = f"goal_clips:ready:{mid}"
-        while True:
-            raw = _dec(await self.redis.lpop(rkey))
-            if raw is None:
-                try:
-                    await self.redis.srem("goal_clips:ready_index", str(mid))
-                except Exception:
-                    pass
-                break
+        hn, an = _alias_team(home), _alias_team(away)
+        try:
+            raws = await self.redis.lrange(rkey, 0, -1)
+        except Exception:
+            return
+        for raw in raws:
             try:
-                clip = json.loads(raw)
+                clip = json.loads(_dec(raw))
             except Exception:
+                await self.redis.lrem(rkey, 1, raw)
                 continue
+            st = _alias_team(clip.get("scoring_team"))
+            if st and _team_eq(st, hn):
+                ok = home_open
+            elif st and _team_eq(st, an):
+                ok = away_open
+            else:
+                ok = home_open or away_open  # unknown scoring team → time-based fallback
+            if not ok:
+                continue  # this team's window isn't open → keep holding
+            await self.redis.lrem(rkey, 1, raw)
             await self._post_clip(settings_rows, mid, home, away, clip)
+        try:
+            if not await self.redis.llen(rkey):
+                await self.redis.srem("goal_clips:ready_index", str(mid))
+        except Exception:
+            pass
 
     async def _post_clip(self, settings_rows, mid, home, away, clip):
         """Post ONE clip as a video to every enabled guild's goal channel — team(s) only,

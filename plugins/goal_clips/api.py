@@ -78,6 +78,7 @@ async def ingest_clip(
     home_score: str = Form(""),
     away_score: str = Form(""),
     scorer: str = Form(""),
+    scoring_team: str = Form(""),
     minute: str = Form(""),
     confidence: str = Form(""),
     x_upload_key: str | None = Header(None, alias="X-Upload-Key"),
@@ -133,7 +134,7 @@ async def ingest_clip(
             "clip_id": clip.id, "tweet_id": tweet_id,
             "home_team": home_team, "away_team": away_team,
             "home_score": hs, "away_score": as_,
-            "scorer": scorer, "minute": minute,
+            "scorer": scorer, "scoring_team": scoring_team, "minute": minute,
         }))
         await redis.expire("goal_clips:incoming", 6 * 3600)
     except Exception:

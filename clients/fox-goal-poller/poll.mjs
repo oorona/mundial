@@ -59,6 +59,7 @@ async function uploadClip(tweetId, handle, text, verdict, blob) {
   fd.append("home_score", verdict.home_score != null ? String(verdict.home_score) : "");
   fd.append("away_score", verdict.away_score != null ? String(verdict.away_score) : "");
   fd.append("scorer", verdict.scorer || "");
+  fd.append("scoring_team", verdict.scoring_team || "");
   fd.append("minute", verdict.minute || "");
   fd.append("confidence", verdict.confidence != null ? String(verdict.confidence) : "");
   const resp = await fetch(`${base}/api/v1/goal-clips/ingest`, {
