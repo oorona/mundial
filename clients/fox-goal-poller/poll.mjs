@@ -9,6 +9,16 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { classifyGoal, downloadBestClip } from "./clip-core.js";
 import { launchContext } from "./browser.mjs";
 
+// Print the version first thing, so you can confirm you're running the latest build.
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL("./package.json", import.meta.url))).version;
+  } catch (_) {
+    return "?";
+  }
+})();
+console.log(`\n  fox-goal-poller v${VERSION}\n`);
+
 if (!existsSync("config.json")) {
   console.error("Missing config.json — copy config.example.json to config.json and fill it in.");
   process.exit(1);
