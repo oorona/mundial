@@ -70,8 +70,10 @@ Use this instead of the browser extension when the machine's screen locks.
 npm start
 ```
 
-You'll see `[fgp] …` lines for every scan/video/download/upload. Those also mirror to the
-server, so the activity is visible there too. Leave this window running during matches.
+You'll see `[fgp] …` lines for every scan/video/download/upload, plus a clear
+**`▶ STREAM START`** line when a game window opens and **`■ STREAM END`** when it closes
+(both also mirror to the server). Those also mirror to the server, so the activity is
+visible there too. Leave this window running during matches.
 
 ## Keep it running automatically
 

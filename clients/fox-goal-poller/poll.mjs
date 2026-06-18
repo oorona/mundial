@@ -75,14 +75,15 @@ async function uploadClip(tweetId, handle, text, blob) {
 }
 
 // Is a match in its play window right now? (server decides — same window the bot uses)
-async function isActive() {
+// Returns { active, matches }. Fails OPEN so a server hiccup never stops capture.
+async function activeWindow() {
   try {
     const r = await fetch(`${base}/api/v1/goal-clips/active`);
-    if (!r.ok) return true; // fail open — don't stop capturing on a server hiccup
+    if (!r.ok) return { active: true, matches: 0 };
     const d = await r.json();
-    return !!d.active;
+    return { active: !!d.active, matches: Number(d.matches || 0) };
   } catch (_) {
-    return true; // fail open
+    return { active: true, matches: 0 };
   }
 }
 
@@ -172,20 +173,24 @@ async function handlePost(p, handle) {
   log("watching", true, "", `@${handles.join(", @")}`);
 
   let lastMirror = 0;
-  let wasIdle = false;
+  let active = null; // unknown until the first check → the first state is always announced
   for (;;) {
     // Only work during a match window (+ buffer). Off-hours clips are ignored.
-    if (!(await isActive())) {
-      if (!wasIdle) {
-        console.log(`[fgp] ${new Date().toISOString().slice(11, 19)} idle — no match in play window; pausing scans`);
-        wasIdle = true;
+    const w = await activeWindow();
+    if (w.active !== active) {
+      active = w.active;
+      if (active) {
+        // STREAM START — a game window opened; begin capturing.
+        log("stream-start", true, "",
+          `▶ STREAM START — ${w.matches || "a"} match(es) live; capturing ${handles.map((h) => "@" + h).join(", ")}`);
+      } else {
+        // STREAM END — the game window closed; stop capturing until the next match.
+        log("stream-end", false, "", "■ STREAM END — no match in play window; pausing scans");
       }
+    }
+    if (!active) {
       await new Promise((r) => setTimeout(r, idleMs));
       continue;
-    }
-    if (wasIdle) {
-      console.log(`[fgp] ${new Date().toISOString().slice(11, 19)} a match is live — resuming scans`);
-      wasIdle = false;
     }
     for (const handle of handles) {
       try {
