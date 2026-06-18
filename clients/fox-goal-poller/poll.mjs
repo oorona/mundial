@@ -100,23 +100,36 @@ async function handlePost(p, handle) {
   if (seen.has(p.id)) return;
   if (handle.toLowerCase() !== p.handle.toLowerCase()) return;
   if (!p.video) return;
-  if (p.time && Date.now() - Date.parse(p.time) > maxAgeMs) { markSeen(p.id); return; }
+  const text1 = (p.text || "").replace(/\s+/g, " ").trim();
+  if (p.time && Date.now() - Date.parse(p.time) > maxAgeMs) {
+    const age = Math.round((Date.now() - Date.parse(p.time)) / 60000);
+    console.log(`[fgp]   ⏭  old video (${age}min) skipped: "${text1.slice(0, 70)}"`);
+    markSeen(p.id);
+    return;
+  }
 
+  // 1) found a fresh video post from the handle
+  log("video", true, p.id, `found video — "${text1.slice(0, 120)}"`);
+
+  // 2) classify the text
   let v;
   try {
     v = await classifyGoal(p.text, cfg.llmApiKey, cfg.llmModel);
   } catch (e) {
-    log("classify", false, p.id, "LLM error: " + e.message);
-    return; // retry next pass
+    log("classify", false, p.id, "LLM error: " + e.message + " (will retry)");
+    return;
   }
   const conf = Number(v?.confidence ?? 0);
   if (!v || !v.is_goal || conf < threshold) {
-    log("classify", false, p.id, `not a goal (${conf.toFixed(2)}) "${(p.text || "").slice(0, 50)}"`);
+    log("classify", false, p.id, `NOT a goal (is_goal=${v?.is_goal}, conf=${conf.toFixed(2)})`);
     markSeen(p.id);
     return;
   }
-  log("GOAL", true, p.id, `⚽ ${v.home_team || "?"} ${v.scorer ? "— " + v.scorer : ""} (${conf.toFixed(2)})`);
+  log("GOAL", true, p.id,
+    `GOAL ✓ ${v.home_team || "?"}${v.away_team ? " vs " + v.away_team : ""}` +
+    `${v.scorer ? " — " + v.scorer : ""} (conf ${conf.toFixed(2)})`);
 
+  // 3) download the mp4
   let clip;
   try {
     clip = await downloadBestClip(p.id);
@@ -126,18 +139,19 @@ async function handlePost(p, handle) {
     return;
   }
   if (!clip || !clip.blob) {
-    log("download", false, p.id, "no mp4 variant (HLS-only?)");
+    log("download", false, p.id, "no mp4 variant (HLS-only?) — skipped");
     markSeen(p.id);
     return;
   }
-  log("download", true, p.id, `${(clip.bytes / 1048576).toFixed(2)} MB`);
+  log("download", true, p.id, `got clip ${(clip.bytes / 1048576).toFixed(2)} MB`);
 
+  // 4) upload to the server
   try {
     const r = await uploadClip(p.id, handle, p.text, v, clip.blob);
-    log("upload", true, p.id, r?.duplicate ? "server already had it" : `clip id ${r?.id}`);
+    log("upload", true, p.id, r?.duplicate ? "server already had it" : `uploaded → clip id ${r?.id}`);
     markSeen(p.id);
   } catch (e) {
-    log("upload", false, p.id, e.message); // leave UN-seen → retry next pass
+    log("upload", false, p.id, e.message + " (will retry)");
   }
 }
 
@@ -147,10 +161,23 @@ async function handlePost(p, handle) {
   console.log(`[fgp] watching ${handles.map((h) => "@" + h).join(", ")} every ${pollMs / 1000}s → ${base}`);
   log("watching", true, "", `@${handles.join(", @")}`);
 
+  let lastMirror = 0;
   for (;;) {
     for (const handle of handles) {
       try {
         const posts = await scrape(page, handle);
+        const vids = posts.filter((p) => p.video).length;
+        // Per-scan heartbeat so it's obvious it's alive and reading the timeline.
+        const t = new Date().toISOString().slice(11, 19);
+        console.log(`[fgp] ${t} scan @${handle}: ${posts.length} posts, ${vids} with video`);
+        if (posts.length === 0) {
+          console.log(`[fgp]   ↳ 0 posts — X may be showing a login wall to the headless browser (re-check your session)`);
+        }
+        // Mirror a heartbeat to the server at most every 5 min (don't flood the log).
+        if (Date.now() - lastMirror > 300000) {
+          log("scan", posts.length > 0, "", `@${handle}: ${posts.length} posts, ${vids} video`);
+          lastMirror = Date.now();
+        }
         for (const p of posts) await handlePost(p, handle);
       } catch (e) {
         log("scan", false, "", `scrape @${handle} failed: ${e.message}`);
