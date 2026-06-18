@@ -74,17 +74,21 @@ export async function classifyGoal(text, apiKey, model = "gemini-flash-latest", 
   const mdl = (model && String(model).trim()) || "gemini-flash-latest";
   const prompt =
     "You are classifying a VIDEO post from a football (soccer) account during the 2026 FIFA " +
-    "World Cup. The video is a GOAL clip if it shows or celebrates a goal (or goals) being " +
-    "scored. Treat ALL of these as goals: 'GOAL', 'scores', 'what a strike/finish/header', " +
-    "'golazo', 'bags a brace', 'hat-trick', a scorer's name celebrating, or a montage of a " +
-    "player's goals. It is NOT a goal clip ONLY if it is clearly about something else: a save, " +
-    "a miss or chance, a yellow/red card, a penalty miss, a preview/lineup/prediction, an " +
-    "interview, a crowd/stadium shot, or general promo. If it plausibly shows a goal, answer " +
-    "is_goal=true (a stray non-goal clip is acceptable). When present, extract the teams, the " +
-    "score after the goal, the scorer, and the minute (leave blank if not stated). IMPORTANT: " +
-    "set scoring_team to the name of the team that SCORED — the post usually makes it explicit " +
-    "(e.g. \"UZBEKISTAN'S goal\", \"scores for Colombia\") → use that team's name; leave it blank " +
-    "only if genuinely unclear. Respond with strict JSON only.\n\nPOST TEXT:\n" + (text || "");
+    "World Cup. Almost every video here is a goal highlight. Set is_goal=true if the text " +
+    "describes a goal being SCORED in ANY tense or phrasing. ALL of these are goals: 'GOAL', " +
+    "'scores' / 'scored', 'gets the goal', 'nets' / 'finds the net', 'finish' / 'header' / " +
+    "'strike' / 'volley', 'golazo', 'converts', 'puts it in', 'on the scoresheet', 'opens the " +
+    "scoring', 'doubles the lead', 'equalizes' / 'levels', 'bags a brace', 'hat-trick', 'instant " +
+    "impact ... scores', a player's CELEBRATION after scoring, or a montage of a player's goals. " +
+    "LEAN YES: if it plausibly describes a goal that was scored, answer is_goal=true with " +
+    "confidence >= 0.75 (a stray non-goal clip is acceptable). Set is_goal=false ONLY when it is " +
+    "clearly NOT a goal: a save / denied chance, a near-miss, a goal DISALLOWED or ruled out by " +
+    "VAR, a yellow/red card, a penalty MISS, a fixture preview / lineup / prediction, an " +
+    "interview, a stat graphic, or a crowd / anthem / stadium shot. When present, extract the " +
+    "teams, the score after the goal, the scorer, and the minute (blank if not stated). " +
+    "IMPORTANT: set scoring_team to the name of the team that SCORED — the post usually says it " +
+    "(e.g. \"UZBEKISTAN'S goal\", \"scores for Switzerland\") → use that team's name; blank only " +
+    "if genuinely unclear. Respond with strict JSON only.\n\nPOST TEXT:\n" + (text || "");
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
