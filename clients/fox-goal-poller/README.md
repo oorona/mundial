@@ -46,16 +46,22 @@ Use this instead of the browser extension when the machine's screen locks.
    - `handles` — the Fox accounts to watch, e.g. `["FOXSports", "FOXSoccer", "FIFAWorldCup"]`
    - `maxAgeMinutes` / `pollSeconds` / `threshold` — leave the defaults unless you want to tune.
 
-5. **Log into X once** (opens Edge; log in, then press Enter in PowerShell):
-   ```
-   node login.mjs
-   ```
-   The session is kept in a local `profile\` folder so the headless poller stays logged in.
+5. **Give it your X session (recommended: import cookies).**
+   If you sign into X with **"Sign in with Google"**, Google blocks automated logins — so
+   don't log in here at all; reuse the session from your everyday browser:
+   1. In your normal browser (where you're already logged into X), install the
+      **Cookie-Editor** extension (Chrome/Edge Web Store).
+   2. Open **https://x.com** (confirm you see your timeline).
+   3. Cookie-Editor → **Export** → **JSON** (it copies to your clipboard).
+   4. Paste into a new file **`cookies.json`** in this folder and save.
+   5. Run:
+      ```
+      node import-cookies.mjs
+      ```
+   This writes `auth.json`. (Cookies are valid for weeks; re-do this if it ever logs out.)
 
-   > **If X still says "this browser may not be secure":** log into x.com normally in your
-   > everyday browser first, then re-run `node login.mjs` (it reuses your Edge profile and
-   > the automation markers are already stripped). If it *still* blocks, tell me and I'll
-   > switch the login to import cookies from your normal browser instead.
+   > **Alternative — direct login** (only if you sign into X with username/password, *not*
+   > Google): `node login.mjs`, log in, press Enter. Google sign-in will be rejected here.
 
 ## Run it
 

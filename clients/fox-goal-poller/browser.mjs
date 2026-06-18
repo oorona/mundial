@@ -1,27 +1,27 @@
-// browser.mjs — launch a persistent browser context that X won't flag as automated.
+// browser.mjs — launch a browser context for the poller.
 //
-// Two tricks defeat the "this browser may not be secure" login block:
-//   1. use a REAL browser (system Edge — always present on Windows) instead of the
-//      bundled test Chromium;
-//   2. strip the automation markers (--enable-automation / navigator.webdriver).
-// The login is kept in a persistent ./profile dir, so the headless poller stays signed in.
+// Uses the real system Edge (with automation markers stripped) and loads the X session
+// from auth.json (produced by import-cookies.mjs from your normal browser, or by
+// login.mjs). We never automate the Google/X LOGIN flow — Google blocks that — we just
+// reuse an already-authenticated session, so viewing the timeline works fine.
 
 import { chromium } from "playwright";
+import { existsSync } from "node:fs";
 
-const PROFILE = "profile";
-
-export async function launchContext(headless) {
-  const opts = {
+export async function launchContext(headless, { useStorage = true } = {}) {
+  const launchOpts = {
     headless,
     args: ["--disable-blink-features=AutomationControlled"],
     ignoreDefaultArgs: ["--enable-automation"],
-    viewport: headless ? { width: 1280, height: 1600 } : null,
   };
-  // Prefer system Edge (real browser, pre-installed on Windows); fall back to Chromium.
+  let browser;
   try {
-    return await chromium.launchPersistentContext(PROFILE, { ...opts, channel: "msedge" });
+    browser = await chromium.launch({ ...launchOpts, channel: "msedge" });
   } catch (e) {
     console.warn("[fgp] Edge unavailable, using bundled Chromium:", e.message);
-    return await chromium.launchPersistentContext(PROFILE, opts);
+    browser = await chromium.launch(launchOpts);
   }
+  const ctxOpts = { viewport: headless ? { width: 1280, height: 1600 } : null };
+  if (useStorage && existsSync("auth.json")) ctxOpts.storageState = "auth.json";
+  return await browser.newContext(ctxOpts);
 }
