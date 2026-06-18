@@ -632,7 +632,11 @@ class LiveTracker(commands.Cog):
         if not file_path or not os.path.exists(file_path):
             log.warning("live_tracker: clip %s file missing — skipping", clip_id)
             return
-        cap = f"🎥 **{home} vs {away}**"
+        # Label the clip by its OWN scorer (from the clip's data) so the video is
+        # self-identifying even if the time-window released it near a different goal's
+        # announcement. No score (the clip stream's score is unreliable) — scorer + teams.
+        scorer = _known(clip.get("scorer"))
+        cap = f"🎥 Gol — **{scorer}** · {home} vs {away}" if scorer else f"🎥 **{home} vs {away}**"
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
             if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
@@ -648,7 +652,8 @@ class LiveTracker(commands.Cog):
                 log.warning("live_tracker: clip post failed (guild %s): %r", guild_id, e)
         await self._push_event({"type": "goal_clip", "match_id": mid, "home": home, "away": away,
                                 "video_url": f"/api/v1/goal-clips/{clip_id}/video",
-                                "text": f"🎥 {home} vs {away}", "ts": int(time.time())})
+                                "text": (f"🎥 {scorer} · {home} vs {away}" if scorer else f"🎥 {home} vs {away}"),
+                                "ts": int(time.time())})
 
     async def _next_match(self) -> dict | None:
         async with self.db.worker_session() as s:
