@@ -1,27 +1,41 @@
-// browser.mjs — launch a browser context for the poller.
-//
-// Uses the real system Edge (with automation markers stripped) and loads the X session
-// from auth.json (produced by import-cookies.mjs from your normal browser, or by
-// login.mjs). We never automate the Google/X LOGIN flow — Google blocks that — we just
-// reuse an already-authenticated session, so viewing the timeline works fine.
+// browser.mjs — launch the browser context for the poller, using whichever X session
+// you have. Two supported sources (it auto-detects):
+//   • profile/   — a persistent Edge login created by login.mjs (works if you can log
+//                  into X with a username/password)
+//   • auth.json  — cookies imported from your normal browser by import-cookies.mjs
+//                  (use this if you sign into X with "Sign in with Google")
+// Real Edge + automation markers stripped, so X is happy either way.
 
 import { chromium } from "playwright";
 import { existsSync } from "node:fs";
 
-export async function launchContext(headless, { useStorage = true } = {}) {
-  const launchOpts = {
-    headless,
-    args: ["--disable-blink-features=AutomationControlled"],
-    ignoreDefaultArgs: ["--enable-automation"],
-  };
+const ARGS = {
+  args: ["--disable-blink-features=AutomationControlled"],
+  ignoreDefaultArgs: ["--enable-automation"],
+};
+
+export async function launchContext(headless) {
+  const viewport = headless ? { width: 1280, height: 1600 } : null;
+
+  // 1) Persistent Edge login profile (from login.mjs), if present.
+  if (existsSync("profile")) {
+    const opts = { ...ARGS, headless, viewport };
+    try {
+      return await chromium.launchPersistentContext("profile", { ...opts, channel: "msedge" });
+    } catch (_) {
+      return await chromium.launchPersistentContext("profile", opts);
+    }
+  }
+
+  // 2) Otherwise a regular context + cookies from auth.json (import-cookies.mjs).
   let browser;
   try {
-    browser = await chromium.launch({ ...launchOpts, channel: "msedge" });
+    browser = await chromium.launch({ ...ARGS, headless, channel: "msedge" });
   } catch (e) {
     console.warn("[fgp] Edge unavailable, using bundled Chromium:", e.message);
-    browser = await chromium.launch(launchOpts);
+    browser = await chromium.launch({ ...ARGS, headless });
   }
-  const ctxOpts = { viewport: headless ? { width: 1280, height: 1600 } : null };
-  if (useStorage && existsSync("auth.json")) ctxOpts.storageState = "auth.json";
+  const ctxOpts = { viewport };
+  if (existsSync("auth.json")) ctxOpts.storageState = "auth.json";
   return await browser.newContext(ctxOpts);
 }

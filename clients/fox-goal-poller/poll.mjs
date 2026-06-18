@@ -13,8 +13,8 @@ if (!existsSync("config.json")) {
   console.error("Missing config.json — copy config.example.json to config.json and fill it in.");
   process.exit(1);
 }
-if (!existsSync("auth.json")) {
-  console.error("No session — create auth.json first:  node import-cookies.mjs  (recommended)  or  node login.mjs");
+if (!existsSync("profile") && !existsSync("auth.json")) {
+  console.error("No X session — log in with:  node login.mjs   (or import cookies:  node import-cookies.mjs)");
   process.exit(1);
 }
 
