@@ -1,12 +1,14 @@
 """
 goal_clips — ingestion + serving API for Fox goal video clips.
 
-The browser extension (clients/fox-goal-clipper) classifies a Fox post as a goal,
-extracts the mp4, and uploads it here. We store the file on the shared /data volume
-(the same `platform_data` volume the bot mounts, so the bot can read the file directly),
-record a GoalClip row, and LPUSH the metadata to Redis `goal_clips:incoming` so the
-live_tracker cog can resolve the match and post the clip when the stream confirms the
-goal. Serving is public so the web <video> and Discord can fetch the file.
+The client (clients/fox-goal-poller or fox-goal-clipper) captures a Fox video post +
+its text during a game window and uploads it here — no goal classification on the client.
+We store the file on the shared /data volume (the same `platform_data` volume the bot
+mounts, so the bot can read the file directly), record a GoalClip row, and LPUSH
+`{clip_id, tweet_id, text}` to Redis `goal_clips:incoming` so the live_tracker cog can
+translate the text and post the video. Serving is public so the web <video> and Discord
+can fetch the file. The two streams are independent: the web stream decides goals; this is
+a dumb relay of the Fox clip.
 
 This is a GLOBAL plugin (routes are NOT under /{guild_id}/): a clip is identical for
 every server. The GuildAuditMiddleware only matches /guilds/{id}/ routes, so these
@@ -128,13 +130,12 @@ async def ingest_clip(
     await db.commit()
     await db.refresh(clip)
 
-    # Hand off to the bot's correlation loop.
+    # Hand off to the bot's relay loop. The two streams are independent now: the web
+    # stream decides goals; this clip is posted as-is with its (translated) text. No
+    # score/team metadata is forwarded — the client no longer classifies.
     try:
         await redis.lpush("goal_clips:incoming", json.dumps({
-            "clip_id": clip.id, "tweet_id": tweet_id,
-            "home_team": home_team, "away_team": away_team,
-            "home_score": hs, "away_score": as_,
-            "scorer": scorer, "scoring_team": scoring_team, "minute": minute,
+            "clip_id": clip.id, "tweet_id": tweet_id, "text": text or "",
         }))
         await redis.expire("goal_clips:incoming", 6 * 3600)
     except Exception:

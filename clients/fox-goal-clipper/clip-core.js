@@ -1,10 +1,9 @@
 // clip-core.js — pure, browser/Node-portable logic with NO chrome.* APIs.
 //
-// Imported by both background.js (the MV3 service worker) and validate.mjs (the
-// headless test harness), so the X-clip download and the Gemini goal classifier are
-// validated as the SAME code the extension actually runs (no parallel reimplementation
-// that can drift). Uses only fetch / FormData / Blob, which exist in service workers
-// and in Node 18+.
+// X-clip download + syndication helpers shared by the poller (poll.mjs) and the browser
+// extension (background.js). Uses only fetch / FormData / Blob, which exist in service
+// workers and in Node 18+. No goal classification lives here anymore — the client relays
+// the video + text and the server decides/translates.
 
 export const DISCORD_MAX = 8 * 1024 * 1024; // prefer a variant Discord can upload natively
 
@@ -67,61 +66,4 @@ export async function downloadBestClip(tweetId, fetchImpl = fetch) {
   const smallest = variants[variants.length - 1];
   const blob = await (await fetchImpl(smallest.url)).blob();
   return { blob, text, variants: variants.length, bytes: blob.size };
-}
-
-// Classify a post's text as a goal (or not) with Gemini structured output.
-export async function classifyGoal(text, apiKey, model = "gemini-flash-latest", fetchImpl = fetch) {
-  const mdl = (model && String(model).trim()) || "gemini-flash-latest";
-  const prompt =
-    "You are classifying a VIDEO post from a football (soccer) account during the 2026 FIFA " +
-    "World Cup. Almost every video here is a goal highlight. Set is_goal=true if the text " +
-    "describes a goal being SCORED in ANY tense or phrasing. ALL of these are goals: 'GOAL', " +
-    "'scores' / 'scored', 'gets the goal', 'nets' / 'finds the net', 'finish' / 'header' / " +
-    "'strike' / 'volley', 'golazo', 'converts', 'puts it in', 'on the scoresheet', 'opens the " +
-    "scoring', 'doubles the lead', 'equalizes' / 'levels', 'bags a brace', 'hat-trick', 'instant " +
-    "impact ... scores', a player's CELEBRATION after scoring, or a montage of a player's goals. " +
-    "LEAN YES: if it plausibly describes a goal that was scored, answer is_goal=true with " +
-    "confidence >= 0.75 (a stray non-goal clip is acceptable). Set is_goal=false ONLY when it is " +
-    "clearly NOT a goal: a save / denied chance, a near-miss, a goal DISALLOWED or ruled out by " +
-    "VAR, a yellow/red card, a penalty MISS, a fixture preview / lineup / prediction, an " +
-    "interview, a stat graphic, or a crowd / anthem / stadium shot. When present, extract the " +
-    "teams, the score after the goal, the scorer, and the minute (blank if not stated). " +
-    "IMPORTANT: set scoring_team to the name of the team that SCORED — the post usually says it " +
-    "(e.g. \"UZBEKISTAN'S goal\", \"scores for Switzerland\") → use that team's name; blank only " +
-    "if genuinely unclear. Respond with strict JSON only.\n\nPOST TEXT:\n" + (text || "");
-
-  const body = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "object",
-        properties: {
-          is_goal: { type: "boolean" },
-          home_team: { type: "string" },
-          away_team: { type: "string" },
-          home_score: { type: "integer" },
-          away_score: { type: "integer" },
-          scorer: { type: "string" },
-          scoring_team: { type: "string" },
-          minute: { type: "string" },
-          confidence: { type: "number" },
-        },
-        required: ["is_goal", "confidence"],
-      },
-    },
-  };
-
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(mdl)}:generateContent?key=` +
-    encodeURIComponent(apiKey);
-  const resp = await fetchImpl(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) throw new Error(`gemini HTTP ${resp.status}: ${await resp.text()}`);
-  const data = await resp.json();
-  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  return raw ? JSON.parse(raw) : null;
 }

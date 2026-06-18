@@ -16,7 +16,7 @@
 </head>
 <body>
   <h1>Fox Goal Clipper — Mundial 2026</h1>
-  <p class="hint">Keep the Fox account's profile (or a list) open in a tab during matches. This page configures where clips go and how they're classified. Everything is stored locally on this machine.</p>
+  <p class="hint">Keep the Fox account's profile (or a list) open in a tab during matches. This page configures where clips go. Every video is relayed to the server (no classification on this machine); the server captions and posts it. Everything is stored locally on this machine.</p>
 
   <label>Server URL
     <input id="serverUrl" type="url" placeholder="https://your-mundial-host" />
@@ -28,24 +28,9 @@
     <span class="hint">Must match the server's <code>goal_clips_upload_key</code> secret.</span>
   </label>
 
-  <label>Gemini API key
-    <input id="llmApiKey" type="password" placeholder="AIza..." />
-    <span class="hint">Used on THIS machine to classify each post's text. Stays local.</span>
-  </label>
-
-  <label>Gemini model
-    <input id="llmModel" type="text" placeholder="gemini-flash-latest" />
-    <span class="hint">Leave blank for <code>gemini-flash-latest</code>.</span>
-  </label>
-
   <label>Monitored handle
     <input id="handle" type="text" placeholder="FoxSoccer" />
     <span class="hint">Without the @. Only posts from this account are considered.</span>
-  </label>
-
-  <label>Confidence threshold
-    <input id="threshold" type="number" step="0.05" min="0" max="1" placeholder="0.6" />
-    <span class="hint">Minimum LLM confidence to treat a post as a goal (0–1).</span>
   </label>
 
   <label>Check for new posts every (sec)

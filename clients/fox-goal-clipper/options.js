@@ -1,6 +1,6 @@
 // options.js — load/save config and request host permission for the server origin.
 
-const FIELDS = ["serverUrl", "uploadKey", "llmApiKey", "llmModel", "handle", "threshold", "refreshSeconds", "reloadSeconds", "maxAgeMinutes"];
+const FIELDS = ["serverUrl", "uploadKey", "handle", "refreshSeconds", "reloadSeconds", "maxAgeMinutes"];
 
 function $(id) {
   return document.getElementById(id);
@@ -18,8 +18,6 @@ chrome.storage.local.get(FIELDS, (cfg) => {
     if (cfg[f] != null) $(f).value = cfg[f];
   }
   if (!$("handle").value) $("handle").value = "FoxSoccer";
-  if (!$("llmModel").value) $("llmModel").value = "gemini-flash-latest";
-  if (!$("threshold").value) $("threshold").value = "0.6";
   if (!$("refreshSeconds").value) $("refreshSeconds").value = "90";
   if (!$("reloadSeconds").value) $("reloadSeconds").value = "300";
   if (!$("maxAgeMinutes").value) $("maxAgeMinutes").value = "15";
@@ -29,8 +27,8 @@ $("save").addEventListener("click", async () => {
   const cfg = {};
   for (const f of FIELDS) cfg[f] = $(f).value.trim();
 
-  if (!cfg.serverUrl || !cfg.uploadKey || !cfg.llmApiKey) {
-    setStatus("Server URL, upload key, and Gemini key are required.", false);
+  if (!cfg.serverUrl || !cfg.uploadKey) {
+    setStatus("Server URL and upload key are required.", false);
     return;
   }
 

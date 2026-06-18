@@ -1,18 +1,17 @@
 # Fox Goal Clipper — Mundial 2026 browser extension
 
-Watches the configured Fox account on **x.com**, keeps only the **video** posts that a
-client-side LLM classifies as a **goal**, downloads the clip, and uploads it to the
-Mundial server. The server holds each clip until the live tracker confirms that goal on
-its stream, then posts the **clip instead of a gif** in every server's goal channel and
-shows it inline in the web "Now" feed. Fully automatic — no approval step.
+Watches the configured Fox account on **x.com**, downloads every **video** post during a
+match, and uploads the clip **+ its text** to the Mundial server. **No classification on
+this machine** — the server translates the text to Spanish and posts the **clip** in every
+server's goal channel and inline in the web "Now" feed. The web live tracker decides and
+announces goals separately; this is just a clip relay. Fully automatic — no approval step.
 
 ```
 x.com (your logged-in tab)
   └─ content.js   detects Fox video posts (MutationObserver) + keeps the timeline fresh
         └─ background.js  (imports clip-core.js)
-             ├─ Gemini: "is this text a goal?"  (your API key, stays on this PC)
              ├─ download the mp4 (Twitter syndication API), preferring <= 8 MB
-             ├─ POST /api/v1/goal-clips/ingest  (X-Upload-Key) with teams + score + scorer
+             ├─ POST /api/v1/goal-clips/ingest  (X-Upload-Key) with the video + post text
              └─ write a line to the activity log (toolbar popup)
 ```
 
@@ -23,10 +22,7 @@ x.com (your logged-in tab)
 3. Open the extension's **Options** and set:
    - **Server URL** — your public Mundial host, e.g. `https://mundial.example.com`.
    - **Upload key** — the exact contents of the server's `secrets/goal_clips_upload_key`.
-   - **Gemini API key** — a Google AI Studio key (used only on this machine).
-   - **Gemini model** — leave blank for `gemini-flash-latest`.
    - **Monitored handle** — the Fox account, without `@` (e.g. `FoxSoccer`).
-   - **Confidence threshold** — default `0.6`.
    - **Check for new posts every (sec)** — pill-click interval, default `90`.
    - **Hard reload every (sec)** — reload backstop, default `300` (0 = off).
    - Click **Save** and **allow** the permission prompt for your server origin.
@@ -42,31 +38,28 @@ x.com (your logged-in tab)
   *Check for new posts* interval (keeps your scroll position) and hard-reloads the tab on
   the *Hard reload* interval as a backstop. **If both are 0, the extension will only see
   posts already on screen.**
-- **Activity log.** Click the toolbar icon to see every decision: detected, classified
-  (goal / not, with confidence), downloaded (size), uploaded (server clip id), skipped,
-  and errors — newest first, with running counts. Also logged to the service-worker
-  console (`[fgc]` lines). Server-side, every transferred clip is a row in the `goal_clips`
-  table (`tweet_id`, `status`, `match_id`, `posted_at`).
-- **Match cross-check.** The upload includes `home_team`, `away_team`, `home_score`,
-  `away_score`, `scorer`, `minute`. The server maps the clip to the live match by team
-  name, then pairs it to the specific goal by the score *after* the goal — so a clip that
-  says "Portugal 2-0" is matched to Portugal's **second** goal.
+- **Activity log.** Click the toolbar icon to see every decision: detected, downloaded
+  (size), uploaded (server clip id), skipped, and errors — newest first, with running
+  counts. Also logged to the service-worker console (`[fgc]` lines). Server-side, every
+  transferred clip is a row in the `goal_clips` table (`tweet_id`, `status`, `posted_at`).
+- **No classification.** The upload includes only the **video** and the post **text**. The
+  server translates the text to Spanish and posts the clip during the game window; goal
+  decisions/announcements come from the web live tracker, independently.
 
 ## Validate (no browser needed for the risky parts)
 
 `validate.mjs` exercises the same `clip-core.js` the extension runs, against the real X
-and Gemini APIs (Node 18+):
+syndication API (Node 18+):
 
 ```bash
 node validate.mjs                                   # static + X syndication reachability
 node validate.mjs https://x.com/FoxSoccer/status/123 # + real clip download from that tweet
-GEMINI_API_KEY=xxxx node validate.mjs https://x.com/FoxSoccer/status/123  # + goal classification
 ```
 
 The DOM detection genuinely needs a browser — validate it manually:
 1. `chrome://extensions` → confirm the extension loaded with **no errors**.
 2. Click the extension → **service worker** to open its console; watch `[fgc]` lines.
-3. Open the Fox profile; the toolbar popup should start showing `scan` / `classify` rows.
+3. Open the Fox profile; the toolbar popup should start showing `scan` / `video` rows.
 
 ## Caveats
 

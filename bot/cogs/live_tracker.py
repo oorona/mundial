@@ -139,11 +139,6 @@ class LiveTracker(commands.Cog):
         ],
     }
 
-    # After the web stream confirms a goal, held/incoming Fox clips post for this long;
-    # outside the window clips are HELD until the next goal (the two streams — the lagging
-    # web score and the fast, noisy clip feed — are synced by TIME, not by scoreline).
-    CLIP_WINDOW = 300
-
     def __init__(self, bot):
         self.bot = bot
         self.db = bot.services.db
@@ -184,10 +179,12 @@ class LiveTracker(commands.Cog):
                 snapshot = await self._live_snapshot(s)
                 await s.commit()
             await self._broadcast(settings_rows, snapshot, ai)
-            # Pushes goal/score events to the WEB feed (Now tab). The Discord goal channel
-            # is driven separately by the _clip_pump time-sync loop (off the match score),
-            # so we no longer enqueue anything here.
-            await self._publish_live_events(snapshot, ai)
+            # Pushes goal/score events to the WEB feed (Now tab) AND returns the new goals
+            # (deduped, budget-capped, minute-ordered). The web stream is the sole goal
+            # decision-maker: we announce each new goal to the Discord goal channel here.
+            # The Fox X clips post independently via _clip_pump (no coordination).
+            new_goals = await self._publish_live_events(snapshot, ai)
+            await self._announce_new_goals(settings_rows, new_goals)
         else:
             # ── NEWS mode (every 8h when nothing is live): AI news about the next/
             # inauguration match → channel + app feed. Confirms the AI pipeline.
@@ -316,6 +313,9 @@ class LiveTracker(commands.Cog):
             # don't re-report, with keys normalized against AI wording wobble.
             r = ai.get(m["id"]) or {}
             seen = self._seen_events.setdefault(m["id"], set())
+            # Running scoreline per goal (minute-sorted) so each announcement shows its
+            # TRUE score regardless of the order the AI surfaced the goals across polls.
+            run = _running_scores(r.get("events"), r.get("status"))
             for ev in (r.get("events") or []):
                 if not isinstance(ev, dict):
                     continue
@@ -342,8 +342,10 @@ class LiveTracker(commands.Cog):
                     # key dedup; the budget blocks them from feed AND channel.
                     if not await self._goal_budget_ok(m["id"], r):
                         continue
+                    h, a = run.get(key, (m["hs"] or 0, m["as_"] or 0))
                     new_goals.append({"match_id": m["id"], "home": m["home"], "away": m["away"],
-                                      "ev": ev, "etype": etype, "hs": m["hs"], "as_": m["as_"]})
+                                      "ev": ev, "etype": etype, "team": ev.get("team"),
+                                      "minute": minute, "player": player, "h": h, "a": a})
                 text = _fmt_event(ev, etype, m["home"], m["away"])
                 await self._push_event({"type": etype, "match_id": m["id"], "home": m["home"],
                                         "away": m["away"], "player": player, "minute": minute,
@@ -440,27 +442,38 @@ class LiveTracker(commands.Cog):
         except Exception:
             return True
 
-    # ── Goal clips (Fox browser extension) — two-stream time sync ────────────────
-    # Two independent streams must be synced: the WEB stream (live_tracker's grounded
-    # search) keeps the correct score but lags; the CLIP stream (the Fox extension)
-    # delivers the video fast but with noisy score/team metadata. So we pair by TIME,
-    # not score: a clip that resolves to a match is HELD; when the web score rises we
-    # announce the goal (with the reliable score) and open a ~CLIP_WINDOW window during
-    # which held + incoming clips post (video only, NO score). Then back to holding.
+    # ── Goal clips (Fox X) — independent relay, NOT coordinated with the web stream ──
+    # The two streams post independently. The WEB stream (grounded search) is the sole
+    # goal decision-maker and announces "¡GOOOL!" (see _announce_new_goals). The CLIP
+    # stream is a dumb relay: the client captures a Fox video + its English text during
+    # the game window and uploads it; here we translate the text to Spanish and post the
+    # video with that caption. No classification, no team-matching, no holding/windowing.
 
     @tasks.loop(seconds=45)
     async def _clip_pump(self):
-        """Fast loop syncing the two streams by TIME: hold arrived clips, announce a goal
-        when the web score rises, and release held clips during the post-goal window."""
+        """Drain uploaded Fox clips and post each as a video with a Spanish caption."""
         if not self.redis or not self.db:
             return
         try:
-            await self._drain_incoming_clips()
-            live = await self._read_inwindow()
+            # Peek the queue first so we only pay for settings + window lookups when there's
+            # actually a clip to post.
+            v = await self.redis.rpop("goal_clips:incoming")
+            if v is None:
+                return
+            in_window = bool(await self._read_inwindow())
             async with self.db.worker_session() as s:
                 settings_rows = (await s.execute(
                     text("SELECT guild_id, settings_json FROM guild_settings"))).all()
-            await self._sync_clips(settings_rows, live)
+            for _ in range(50):
+                if v is None:
+                    break
+                try:
+                    clip = json.loads(_dec(v))
+                except Exception:
+                    v = await self.redis.rpop("goal_clips:incoming")
+                    continue
+                await self._relay_clip(settings_rows, clip, in_window)
+                v = await self.redis.rpop("goal_clips:incoming")
         except Exception as e:
             log.warning("live_tracker: clip pump failed: %r", e)
 
@@ -468,181 +481,45 @@ class LiveTracker(commands.Cog):
     async def _before_pump(self):
         await self.bot.wait_until_ready()
 
-    async def _drain_incoming_clips(self):
-        """Pop newly-uploaded clips and bucket each under the live match it belongs to.
-        Unresolved clips (no matching live game yet) are retried a few times then dropped."""
-        raws = []
-        for _ in range(50):
-            v = await self.redis.rpop("goal_clips:incoming")
-            if v is None:
-                break
-            raws.append(_dec(v))
-        if not raws:
-            return
-        live = await self._read_inwindow()
-        for raw in raws:
-            try:
-                clip = json.loads(raw)
-            except Exception:
-                continue
-            mid = self._resolve_match(clip, live)
-            if mid is not None:
-                await self.redis.rpush(f"goal_clips:ready:{mid}", json.dumps({
-                    "clip_id": clip.get("clip_id"),
-                    "home_score": clip.get("home_score"), "away_score": clip.get("away_score"),
-                    "scorer": clip.get("scorer"), "scoring_team": clip.get("scoring_team"),
-                    "minute": clip.get("minute")}))
-                await self.redis.expire(f"goal_clips:ready:{mid}", 3 * 3600)
-                await self.redis.sadd("goal_clips:ready_index", str(mid))
-                await self.redis.expire("goal_clips:ready_index", 3 * 3600)
-            else:
-                att = int(clip.get("_attempts", 0)) + 1
-                if att <= 8:
-                    clip["_attempts"] = att
-                    await self.redis.rpush("goal_clips:incoming", json.dumps(clip))
-                    await self.redis.expire("goal_clips:incoming", 6 * 3600)
-                else:
-                    log.info("live_tracker: dropping unresolved clip %s (no live match)", clip.get("clip_id"))
-                    try:
-                        async with self.db.worker_session() as s:
-                            await s.execute(text("UPDATE goal_clips SET status='expired' WHERE id=:i"),
-                                            {"i": clip.get("clip_id")})
-                            await s.commit()
-                    except Exception:
-                        pass
-
-    def _resolve_match(self, clip: dict, live: list[dict]):
-        """Best-effort: map a clip's parsed team names to a live match id (≤1–2 live, so
-        a small alias map + substring compare is enough). None if nothing matches."""
-        ch, ca = _alias_team(clip.get("home_team")), _alias_team(clip.get("away_team"))
-        if not ch and not ca:
-            return None
-        best, best_score = None, 0
-        for m in live:
-            mh, ma = _alias_team(m.get("home_name")), _alias_team(m.get("away_name"))
-            score = (1 if ch and (_team_eq(ch, mh) or _team_eq(ch, ma)) else 0) \
-                  + (1 if ca and (_team_eq(ca, mh) or _team_eq(ca, ma)) else 0)
-            if score > best_score:
-                best, best_score = m["id"], score
-        return best if best_score >= 1 else None
-
-    async def _sync_clips(self, settings_rows, live):
-        """Run the per-match hold/announce/window state machine for every live match (plus
-        any match still holding clips)."""
-        ids = {m["id"] for m in live}
+    async def _translate_caption(self, text_en: str) -> str:
+        """Translate a Fox post's English text to Spanish for the channel caption. Returns
+        the original text on any error/empty so a clip is never dropped over translation."""
+        src = (text_en or "").strip()
+        if not src:
+            return ""
+        provider = self.llm.providers.get("google") if (self.llm and self.llm.providers) else None
+        if not provider:
+            return src
         try:
-            idx = await self.redis.smembers("goal_clips:ready_index")
-            ids |= {int(_dec(x)) for x in (idx or set())}
+            from services.llm import LLMMessage
+            sys = (
+                "Traduce al español (es-MX) el texto de una publicación de fútbol. "
+                "Devuelve ÚNICAMENTE la traducción, sin comillas ni comentarios, conservando "
+                "los emojis y los nombres propios. Si ya está en español, devuélvelo igual."
+            )
+            out = await provider.generate_response(
+                [LLMMessage(role="user", content=src)], system_prompt=sys)
+            out = out if isinstance(out, str) else json.dumps(out)
+            return out.strip() or src
         except Exception:
-            pass
-        if not ids:
-            return
-        async with self.db.worker_session() as s:
-            rows = (await s.execute(text("""
-                SELECT m.id AS id, m.home_score AS hs, m.away_score AS as_,
-                       ht.name_en AS home, at.name_en AS away
-                FROM matches m JOIN teams ht ON ht.id=m.home_team_id JOIN teams at ON at.id=m.away_team_id
-                WHERE m.id = ANY(:ids)"""), {"ids": list(ids)})).mappings().all()
-        now = int(time.time())
-        for r in rows:
-            await self._sync_match(settings_rows, r["id"], r["home"], r["away"],
-                                   r["hs"] or 0, r["as_"] or 0, now)
+            return src
 
-    async def _sync_match(self, settings_rows, mid, home, away, H, A, now):
-        """Per-TEAM sync. When the web score rises we announce the goal — naming the side
-        that scored (home vs away, which the web stream knows reliably) — and open a window
-        for THAT team. Held clips are released only for the team whose window is open,
-        matched by the clip's own scoring_team. So a clip can never be attached to the
-        other team's goal. Clips whose scoring team can't be determined fall back to time.
-        The web stream owns the score; the clip stream owns the video."""
-        hk, ak = f"clips:home_total:{mid}", f"clips:away_total:{mid}"
-        whk, wak = f"clips:win_home:{mid}", f"clips:win_away:{mid}"
-
-        async def _get_int(k):
-            try:
-                v = _dec(await self.redis.get(k))
-                return int(v) if v is not None else None
-            except Exception:
-                return None
-
-        ph = await _get_int(hk)
-        if ph is None:
-            # First sight — record current scores WITHOUT announcing (don't replay history).
-            await self.redis.set(hk, H, ex=6 * 3600)
-            await self.redis.set(ak, A, ex=6 * 3600)
-        else:
-            pa = await _get_int(ak) or 0
-            if H > ph:  # home team scored
-                await self._announce_goal_text(settings_rows, home, away, H, A, home)
-                await self.redis.set(hk, H, ex=6 * 3600)
-                await self.redis.set(whk, now + self.CLIP_WINDOW, ex=6 * 3600)
-            if A > pa:  # away team scored
-                await self._announce_goal_text(settings_rows, home, away, H, A, away)
-                await self.redis.set(ak, A, ex=6 * 3600)
-                await self.redis.set(wak, now + self.CLIP_WINDOW, ex=6 * 3600)
-
-        home_open = now < ((await _get_int(whk)) or 0)
-        away_open = now < ((await _get_int(wak)) or 0)
-        if home_open or away_open:
-            await self._flush_held_clips(settings_rows, mid, home, away, home_open, away_open)
-
-    async def _announce_goal_text(self, settings_rows, home, away, H, A, scoring_team):
-        """Post the goal announcement once to every enabled guild's goal channel, naming
-        the team that scored and the authoritative web-stream score."""
-        msg = f"⚽ ¡GOOOL de **{scoring_team}**! · {home} {H}–{A} {away}"
-        for guild_id, settings_json in settings_rows:
-            settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
-            if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
-                continue
-            guild = self.bot.get_guild(int(guild_id))
-            channel = guild.get_channel(int(settings["lt_goal_channel_id"])) if guild else None
-            if channel is None:
-                continue
-            goal_role_id = settings.get("lt_goal_role_id")
-            ping = f"<@&{int(goal_role_id)}> " if goal_role_id else ""
-            try:
-                await channel.send(content=ping + msg,
-                                   allowed_mentions=discord.AllowedMentions(roles=True))
-            except discord.HTTPException as e:
-                log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
-
-    async def _flush_held_clips(self, settings_rows, mid, home, away, home_open, away_open):
-        """Release held clips whose scoring team's window is open. A clip is matched to a
-        side by its scoring_team; one with no usable scoring_team falls back to time-based
-        (released in any open window). Non-matching clips stay held for their own goal."""
-        rkey = f"goal_clips:ready:{mid}"
-        hn, an = _alias_team(home), _alias_team(away)
-        try:
-            raws = await self.redis.lrange(rkey, 0, -1)
-        except Exception:
-            return
-        for raw in raws:
-            try:
-                clip = json.loads(_dec(raw))
-            except Exception:
-                await self.redis.lrem(rkey, 1, raw)
-                continue
-            st = _alias_team(clip.get("scoring_team"))
-            if st and _team_eq(st, hn):
-                ok = home_open
-            elif st and _team_eq(st, an):
-                ok = away_open
-            else:
-                ok = home_open or away_open  # unknown scoring team → time-based fallback
-            if not ok:
-                continue  # this team's window isn't open → keep holding
-            await self.redis.lrem(rkey, 1, raw)
-            await self._post_clip(settings_rows, mid, home, away, clip)
-        try:
-            if not await self.redis.llen(rkey):
-                await self.redis.srem("goal_clips:ready_index", str(mid))
-        except Exception:
-            pass
-
-    async def _post_clip(self, settings_rows, mid, home, away, clip):
-        """Post ONE clip as a video to every enabled guild's goal channel — team(s) only,
-        NO score (the clip stream's score is unreliable) — and push it to the web feed."""
+    async def _relay_clip(self, settings_rows, clip, in_window: bool):
+        """Post one uploaded Fox clip as a video with a Spanish caption to every enabled
+        guild's goal channel, and push it to the web feed. Independent of the web goal
+        stream — it relays whatever Fox showed. Gated to the live game window (a backstop;
+        the client already captures only during the window)."""
         clip_id = clip.get("clip_id")
+        if not in_window:
+            # No game in window — drop it so an off-hours clip never posts.
+            try:
+                async with self.db.worker_session() as s:
+                    await s.execute(text("UPDATE goal_clips SET status='expired' WHERE id=:i"),
+                                    {"i": clip_id})
+                    await s.commit()
+            except Exception:
+                pass
+            return
         file_path = None
         try:
             async with self.db.worker_session() as s:
@@ -651,19 +528,16 @@ class LiveTracker(commands.Cog):
                 if row:
                     file_path = row["file_path"]
                 await s.execute(
-                    text("UPDATE goal_clips SET status='posted', match_id=:m, posted_at=now() WHERE id=:i"),
-                    {"m": mid, "i": clip_id})
+                    text("UPDATE goal_clips SET status='posted', posted_at=now() WHERE id=:i"),
+                    {"i": clip_id})
                 await s.commit()
         except Exception as e:
             log.warning("live_tracker: clip lookup/mark failed for clip %s: %r", clip_id, e)
         if not file_path or not os.path.exists(file_path):
             log.warning("live_tracker: clip %s file missing — skipping", clip_id)
             return
-        # Label the clip by its OWN scorer (from the clip's data) so the video is
-        # self-identifying even if the time-window released it near a different goal's
-        # announcement. No score (the clip stream's score is unreliable) — scorer + teams.
-        scorer = _known(clip.get("scorer"))
-        cap = f"🎥 Gol — **{scorer}** · {home} vs {away}" if scorer else f"🎥 **{home} vs {away}**"
+        es = await self._translate_caption(clip.get("text") or "")
+        cap = f"🎥 {es}" if es else "🎥 ⚽"
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
             if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
@@ -673,14 +547,43 @@ class LiveTracker(commands.Cog):
             if channel is None:
                 continue
             try:
-                await channel.send(content=cap,
-                                   file=discord.File(file_path, filename=f"gol_{mid}_{clip_id}.mp4"))
+                await channel.send(content=cap[:1900],
+                                   file=discord.File(file_path, filename=f"gol_{clip_id}.mp4"))
             except discord.HTTPException as e:
                 log.warning("live_tracker: clip post failed (guild %s): %r", guild_id, e)
-        await self._push_event({"type": "goal_clip", "match_id": mid, "home": home, "away": away,
+        await self._push_event({"type": "goal_clip",
                                 "video_url": f"/api/v1/goal-clips/{clip_id}/video",
-                                "text": (f"🎥 {scorer} · {home} vs {away}" if scorer else f"🎥 {home} vs {away}"),
-                                "ts": int(time.time())})
+                                "text": cap, "ts": int(time.time())})
+
+    async def _announce_new_goals(self, settings_rows, new_goals):
+        """Announce each new goal once to every enabled guild's goal channel. The web stream
+        is the sole goal decision-maker: it names the side that scored, the scorer + minute,
+        and a running scoreline tallied in MINUTE order (so a goal surfaced out of order still
+        shows its true score — never an impossible line). Dedup + restart-safety come from the
+        persisted live:seen:{mid} set and the goal budget upstream in _publish_live_events."""
+        for g in (new_goals or []):
+            home, away = g["home"], g["away"]
+            is_home = str(g.get("team") or "").strip().lower() in ("home", "local")
+            scoring_team = home if is_home else away
+            scorer = _known(g["ev"].get("player"))
+            minute = _clean_minute(g["ev"])
+            who = f" · {scorer} {minute}".rstrip() if scorer else (f" · {minute}" if minute else "")
+            msg = f"⚽ ¡GOOOL de **{scoring_team}**!{who} · {home} {g['h']}–{g['a']} {away}"
+            for guild_id, settings_json in settings_rows:
+                settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
+                if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
+                    continue
+                guild = self.bot.get_guild(int(guild_id))
+                channel = guild.get_channel(int(settings["lt_goal_channel_id"])) if guild else None
+                if channel is None:
+                    continue
+                goal_role_id = settings.get("lt_goal_role_id")
+                ping = f"<@&{int(goal_role_id)}> " if goal_role_id else ""
+                try:
+                    await channel.send(content=ping + msg,
+                                       allowed_mentions=discord.AllowedMentions(roles=True))
+                except discord.HTTPException as e:
+                    log.warning("live_tracker: goal announce failed (guild %s): %r", guild_id, e)
 
     async def _next_match(self) -> dict | None:
         async with self.db.worker_session() as s:
@@ -1469,6 +1372,56 @@ def _event_key(ev, etype) -> str:
     return f"{etype}|{minute}|{team}|{player}"
 
 
+def _minute_sort_key(minute_str) -> tuple[int, int]:
+    """Sort key for a match minute: "90+3'"→(90,3), "74'"→(74,0); blank/vague→(9999,0)
+    so they sort last and keep the AI's original array order as the tiebreak."""
+    s = re.sub(r"[^0-9+]", "", str(minute_str or ""))
+    if not s:
+        return (9999, 0)
+    base, _, extra = s.partition("+")
+    try:
+        b = int(base) if base else 9999
+    except ValueError:
+        b = 9999
+    try:
+        e = int(extra) if extra else 0
+    except ValueError:
+        e = 0
+    return (b, e)
+
+
+def _running_scores(events, status: str = "") -> dict[str, tuple[int, int]]:
+    """Map each goal event's _event_key → the running (home, away) score AFTER it.
+
+    Goals are tallied in MINUTE order (not the AI's array/detection order), so a goal's
+    displayed scoreline is its true score even when goals are detected out of order across
+    polls — the web stream owns the score, the announcement just reads this map. Shootout
+    kicks (status 'penalties') are skipped: that result is shown via home_pens/away_pens,
+    not the 90-minute score. An own_goal credits the OPPOSITE side of ev['team']."""
+    if str(status or "").strip().lower() in ("penalties", "shootout", "penales"):
+        return {}
+    goals = []
+    for ev in (events or []):
+        if not isinstance(ev, dict):
+            continue
+        et = _norm_event_type(ev.get("type"))
+        if et in ("goal", "own_goal", "penalty_goal"):
+            goals.append((ev, et))
+    goals.sort(key=lambda ge: _minute_sort_key(ge[0].get("minute")))
+    h = a = 0
+    out: dict[str, tuple[int, int]] = {}
+    for ev, et in goals:
+        is_home = str(ev.get("team") or "").strip().lower() in ("home", "local")
+        if et == "own_goal":
+            is_home = not is_home  # an own goal credits the other team
+        if is_home:
+            h += 1
+        else:
+            a += 1
+        out[_event_key(ev, et)] = (h, a)
+    return out
+
+
 def _norm_event_type(t):
     """Normalize a model-supplied event type to a known key, or None to drop it."""
     t = str(t or "").strip().lower().replace(" ", "_").replace("-", "_")
@@ -1483,40 +1436,6 @@ def _team_name(ev, home, away) -> str:
     if side in ("away", "visitor", "visitante", "away_team"):
         return away
     return str(ev.get("team") or "").strip()  # already a team name, or empty
-
-
-# Fox / common short names → our teams.name_en. Used to map a clip's parsed team
-# names to a live match (≤1–2 live at once, so this small map is enough).
-_TEAM_ALIASES = {
-    "usa": "united states", "us": "united states", "usmnt": "united states",
-    "united states of america": "united states",
-    "korea": "south korea", "korea republic": "south korea",
-    "republic of korea": "south korea", "south korea": "south korea",
-    "czechia": "czech republic",
-    "bosnia": "bosnia and herzegovina", "bosnia herzegovina": "bosnia and herzegovina",
-    "dr congo": "democratic republic of the congo", "drc": "democratic republic of the congo",
-    "congo dr": "democratic republic of the congo",
-    "cote divoire": "ivory coast", "cote d ivoire": "ivory coast", "ivory coast": "ivory coast",
-    "uae": "united arab emirates", "ksa": "saudi arabia",
-}
-
-
-def _alias_team(s) -> str:
-    """Normalize a team name (lowercase, strip accents/punctuation) and apply aliases."""
-    n = unicodedata.normalize("NFKD", str(s or "").lower()).encode("ascii", "ignore").decode()
-    n = re.sub(r"[^a-z0-9 ]", " ", n)
-    n = re.sub(r"\s+", " ", n).strip()
-    return _TEAM_ALIASES.get(n, n)
-
-
-def _team_eq(a: str, b: str) -> bool:
-    """True if two normalized team names match — exact, or one contains the other
-    (guarded by length ≥ 4 so short tokens don't cross-match)."""
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    return min(len(a), len(b)) >= 4 and (a in b or b in a)
 
 
 # Every event line says WHAT happened in words — emoji alone is ambiguous

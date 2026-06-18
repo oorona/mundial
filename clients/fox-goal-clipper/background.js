@@ -2,14 +2,14 @@
 //
 // Per candidate (from content.js):
 //   1. dedup (durable, chrome.storage.local)
-//   2. LLM goal check on the post TEXT (Gemini) — false positives are OK
-//   3. if goal: download the mp4 variant (Twitter syndication API, prefers <= 8 MB)
-//   4. POST the clip + parsed metadata to the Mundial server's /goal-clips/ingest
+//   2. download the mp4 variant (Twitter syndication API, prefers <= 8 MB)
+//   3. POST the clip + its text to the Mundial server's /goal-clips/ingest
 //
-// Every decision is written to a viewable log (chrome.storage.local 'log'), shown in the
-// toolbar popup, so you can see exactly what the extension did with each post.
+// No goal classification on the client — the server translates the text and posts the
+// clip. Every decision is written to a viewable log (chrome.storage.local 'log'), shown
+// in the toolbar popup, so you can see exactly what the extension did with each post.
 
-import { downloadBestClip, classifyGoal } from "./clip-core.js";
+import { downloadBestClip } from "./clip-core.js";
 
 const PROCESSED_CAP = 800;
 const LOG_CAP = 200;
@@ -57,7 +57,7 @@ async function mirrorToServer(entry) {
 // ── Config + dedup ──────────────────────────────────────────────────────────────
 async function getConfig() {
   return await chrome.storage.local.get([
-    "serverUrl", "uploadKey", "llmApiKey", "llmModel", "handle", "threshold",
+    "serverUrl", "uploadKey", "handle",
   ]);
 }
 
@@ -78,7 +78,7 @@ async function markProcessed(id) {
 // ── Pipeline ────────────────────────────────────────────────────────────────────
 async function handleCandidate({ tweetId, handle, text }) {
   const cfg = await getConfig();
-  if (!cfg.serverUrl || !cfg.uploadKey || !cfg.llmApiKey) {
+  if (!cfg.serverUrl || !cfg.uploadKey) {
     logEvent(tweetId, "skip", false, "not configured — open Options");
     return;
   }
@@ -89,27 +89,9 @@ async function handleCandidate({ tweetId, handle, text }) {
   }
   if (await alreadyProcessed(tweetId)) return; // already decided; no log noise
 
-  // 2. classify
-  let verdict;
-  try {
-    verdict = await classifyGoal(text, cfg.llmApiKey, cfg.llmModel);
-  } catch (e) {
-    logEvent(tweetId, "classify", false, "LLM error: " + e.message + " (will retry)");
-    return; // leave UN-marked so a later rescan retries
-  }
-  const threshold = Number(cfg.threshold ?? 0.6);
-  const conf = Number(verdict?.confidence ?? 0);
-  if (!verdict || !verdict.is_goal || conf < threshold) {
-    logEvent(tweetId, "classify", false,
-      `not a goal (is_goal=${verdict?.is_goal}, conf=${conf.toFixed(2)}) — "${(text || "").slice(0, 60)}"`);
-    await markProcessed(tweetId);
-    return;
-  }
-  logEvent(tweetId, "GOAL", true,
-    `⚽ GOAL DETECTED — ${verdict.home_team || "?"} ${verdict.home_score ?? "?"}-${verdict.away_score ?? "?"} ${verdict.away_team || "?"}`
-    + (verdict.scorer ? `, ${verdict.scorer}` : "") + ` (conf ${conf.toFixed(2)})`);
+  logEvent(tweetId, "video", true, `relaying video — "${(text || "").slice(0, 120)}"`);
 
-  // 3. download
+  // 2. download
   let clip;
   try {
     clip = await downloadBestClip(tweetId);
@@ -124,9 +106,9 @@ async function handleCandidate({ tweetId, handle, text }) {
   }
   logEvent(tweetId, "download", true, `${(clip.bytes / 1048576).toFixed(2)} MB, ${clip.variants} variant(s)`);
 
-  // 4. upload
+  // 3. upload (video + text only)
   try {
-    const res = await uploadClip(cfg.serverUrl, cfg.uploadKey, tweetId, handle, text, verdict, clip.blob);
+    const res = await uploadClip(cfg.serverUrl, cfg.uploadKey, tweetId, handle, text, clip.blob);
     logEvent(tweetId, "upload", true, res?.duplicate ? "server already had it" : `uploaded → clip id ${res?.id}`);
   } catch (e) {
     logEvent(tweetId, "upload", false, e.message + " (will retry)");
@@ -135,21 +117,13 @@ async function handleCandidate({ tweetId, handle, text }) {
   await markProcessed(tweetId);
 }
 
-async function uploadClip(serverUrl, uploadKey, tweetId, handle, text, verdict, blob) {
+async function uploadClip(serverUrl, uploadKey, tweetId, handle, text, blob) {
   const base = serverUrl.replace(/\/+$/, "");
   const fd = new FormData();
   fd.append("video", blob, `${tweetId}.mp4`);
   fd.append("tweet_id", tweetId);
   fd.append("tweet_url", `https://x.com/${handle}/status/${tweetId}`);
   fd.append("text", text || "");
-  fd.append("home_team", verdict.home_team || "");
-  fd.append("away_team", verdict.away_team || "");
-  fd.append("home_score", verdict.home_score != null ? String(verdict.home_score) : "");
-  fd.append("away_score", verdict.away_score != null ? String(verdict.away_score) : "");
-  fd.append("scorer", verdict.scorer || "");
-  fd.append("scoring_team", verdict.scoring_team || "");
-  fd.append("minute", verdict.minute || "");
-  fd.append("confidence", verdict.confidence != null ? String(verdict.confidence) : "");
 
   const resp = await fetch(`${base}/api/v1/goal-clips/ingest`, {
     method: "POST",

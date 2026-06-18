@@ -1,10 +1,11 @@
 # Fox Goal Poller — headless background capture (Windows)
 
-A background process that watches Fox's X account(s) for goal clips and uploads them to
-the Mundial server — using the **same** classify → download → upload logic as the browser
-extension, but **headless**. There is no visible browser window, so the **OS screen lock
-has no effect**: as long as the PC is awake, it keeps capturing goals whether you're at the
-desk or away.
+A background process that watches Fox's X account(s) during match windows and uploads each
+**video + its text** to the Mundial server — the **same** download → upload logic as the
+browser extension, but **headless** and with **no classification** (the server translates
+the text and posts the clip). There is no visible browser window, so the **OS screen lock
+has no effect**: as long as the PC is awake, it keeps capturing whether you're at the desk
+or away.
 
 Use this instead of the browser extension when the machine's screen locks.
 
@@ -42,9 +43,9 @@ Use this instead of the browser extension when the machine's screen locks.
    ```
    - `serverUrl` — your Mundial host (e.g. `https://mundial.mexicodev.org`)
    - `uploadKey` — the server's `goal_clips_upload_key`
-   - `llmApiKey` — your Google AI Studio (Gemini) key
-   - `handles` — the Fox accounts to watch, e.g. `["FOXSports", "FOXSoccer", "FIFAWorldCup"]`
-   - `maxAgeMinutes` / `pollSeconds` / `threshold` — leave the defaults unless you want to tune.
+   - `handles` — the Fox accounts to watch, e.g. `["FOXSoccer"]`
+   - `maxAgeMinutes` / `pollSeconds` — leave the defaults unless you want to tune.
+   - No Gemini key needed anymore — the client no longer classifies; it just relays.
 
 5. **Give it your X session (recommended: import cookies).**
    If you sign into X with **"Sign in with Google"**, Google blocks automated logins — so
@@ -69,7 +70,7 @@ Use this instead of the browser extension when the machine's screen locks.
 npm start
 ```
 
-You'll see `[fgp] …` lines for every scan/classify/download/upload. Those also mirror to the
+You'll see `[fgp] …` lines for every scan/video/download/upload. Those also mirror to the
 server, so the activity is visible there too. Leave this window running during matches.
 
 ## Keep it running automatically
@@ -102,5 +103,5 @@ Double-click `run.bat` (or add a shortcut to it in `shell:startup` so it launche
   (`article`, `/handle/status/id`, `data-testid="videoComponent"`); if it stops finding
   posts, those selectors in `poll.mjs` are the first thing to update.
 - **Keys/session stay local** in `config.json` / the `profile\` folder (git-ignored).
-  Nothing is sent anywhere except Google (classification) and your own server (upload).
+  Nothing is sent anywhere except your own server (the clip upload).
 - HLS-only videos (no MP4 variant) are skipped, same as the extension.

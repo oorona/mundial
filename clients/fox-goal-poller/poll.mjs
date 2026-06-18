@@ -1,12 +1,13 @@
 // poll.mjs — headless background poller.
 //
 // Loops forever: opens each configured Fox handle's profile in a HEADLESS browser
-// (using the saved login from login.mjs), finds new video posts, runs the same Gemini
-// goal check + syndication download + upload as the extension (clip-core.js). No visible
-// window, so the OS screen lock has no effect — it runs as long as the PC is awake.
+// (using the saved login from login.mjs), finds new video posts during a game window, and
+// uploads each video + its text to the server (clip-core.js for syndication download). No
+// goal classification on the client — the server translates the text and posts the clip.
+// No visible window, so the OS screen lock has no effect — it runs as long as the PC is awake.
 
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { classifyGoal, downloadBestClip, fetchSyndication } from "./clip-core.js";
+import { downloadBestClip, fetchSyndication } from "./clip-core.js";
 import { launchContext } from "./browser.mjs";
 
 // Print the version first thing, so you can confirm you're running the latest build.
@@ -35,7 +36,6 @@ const handles = (cfg.handles && cfg.handles.length ? cfg.handles : ["FOXSports"]
 const pollMs = (Number(cfg.pollSeconds) || 45) * 1000;
 const idleMs = (Number(cfg.idleSeconds) || 300) * 1000; // how often to re-check when no game is on
 const maxAgeMs = (Number(cfg.maxAgeMinutes) || 20) * 60000;
-const threshold = Number(cfg.threshold ?? 0.6);
 const base = String(cfg.serverUrl || "").replace(/\/+$/, "");
 
 // ── durable dedup ────────────────────────────────────────────────────────────
@@ -58,21 +58,13 @@ function log(stage, ok, id, detail) {
   }).catch(() => {});
 }
 
-// ── upload (same shape as the extension) ─────────────────────────────────────
-async function uploadClip(tweetId, handle, text, verdict, blob) {
+// ── upload: just the video + its text (no classification metadata) ───────────
+async function uploadClip(tweetId, handle, text, blob) {
   const fd = new FormData();
   fd.append("video", blob, `${tweetId}.mp4`);
   fd.append("tweet_id", tweetId);
   fd.append("tweet_url", `https://x.com/${handle}/status/${tweetId}`);
   fd.append("text", text || "");
-  fd.append("home_team", verdict.home_team || "");
-  fd.append("away_team", verdict.away_team || "");
-  fd.append("home_score", verdict.home_score != null ? String(verdict.home_score) : "");
-  fd.append("away_score", verdict.away_score != null ? String(verdict.away_score) : "");
-  fd.append("scorer", verdict.scorer || "");
-  fd.append("scoring_team", verdict.scoring_team || "");
-  fd.append("minute", verdict.minute || "");
-  fd.append("confidence", verdict.confidence != null ? String(verdict.confidence) : "");
   const resp = await fetch(`${base}/api/v1/goal-clips/ingest`, {
     method: "POST",
     headers: { "X-Upload-Key": cfg.uploadKey },
@@ -143,30 +135,11 @@ async function handlePost(p, handle) {
     } catch (_) {}
   }
 
-  // 1) found a fresh video post on this channel — show its FULL text
+  // 1) found a fresh video post on this channel — show its FULL text. No classification:
+  //    relay every Fox video during the game window; the server captions it in Spanish.
   plog("video", true, `found video — "${text1.slice(0, 500)}"`);
 
-  // 2) classify the text — ALWAYS echo the text with the verdict so you can cross-check
-  let v;
-  try {
-    v = await classifyGoal(text1, cfg.llmApiKey, cfg.llmModel);
-  } catch (e) {
-    plog("classify", false, "LLM error: " + e.message + " (will retry)");
-    return;
-  }
-  const conf = Number(v?.confidence ?? 0);
-  if (!v || !v.is_goal || conf < threshold) {
-    plog("classify", false,
-      `NOT a goal (is_goal=${v?.is_goal}, conf=${conf.toFixed(2)}) — TEXT: "${text1.slice(0, 500)}"`);
-    markSeen(p.id);
-    return;
-  }
-  plog("GOAL", true,
-    `GOAL ✓ ${v.home_team || "?"}${v.away_team ? " vs " + v.away_team : ""}` +
-    `${v.scorer ? " — " + v.scorer : ""}${v.scoring_team ? " [scored: " + v.scoring_team + "]" : ""}` +
-    ` (conf ${conf.toFixed(2)}) — TEXT: "${text1.slice(0, 300)}"`);
-
-  // 3) download the mp4
+  // 2) download the mp4
   let clip;
   try {
     clip = await downloadBestClip(p.id);
@@ -182,9 +155,9 @@ async function handlePost(p, handle) {
   }
   plog("download", true, `got clip ${(clip.bytes / 1048576).toFixed(2)} MB`);
 
-  // 4) upload to the server
+  // 3) upload to the server (video + text only)
   try {
-    const r = await uploadClip(p.id, handle, text1, v, clip.blob);
+    const r = await uploadClip(p.id, handle, text1, clip.blob);
     plog("upload", true, r?.duplicate ? "server already had it" : `uploaded → clip id ${r?.id}`);
     markSeen(p.id);
   } catch (e) {
