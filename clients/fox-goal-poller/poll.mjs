@@ -6,7 +6,7 @@
 // window, so the OS screen lock has no effect — it runs as long as the PC is awake.
 
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { classifyGoal, downloadBestClip } from "./clip-core.js";
+import { classifyGoal, downloadBestClip, fetchSyndication } from "./clip-core.js";
 import { launchContext } from "./browser.mjs";
 
 // Print the version first thing, so you can confirm you're running the latest build.
@@ -124,12 +124,21 @@ async function handlePost(p, handle) {
   if (seen.has(p.id)) return;
   if (handle.toLowerCase() !== p.handle.toLowerCase()) return;
   if (!p.video) return;
-  const text1 = (p.text || "").replace(/\s+/g, " ").trim();
+  let text1 = (p.text || "").replace(/\s+/g, " ").trim();
   if (p.time && Date.now() - Date.parse(p.time) > maxAgeMs) {
     const age = Math.round((Date.now() - Date.parse(p.time)) / 60000);
     console.log(`[fgp]   ⏭  old video (${age}min) skipped: "${text1.slice(0, 70)}"`);
     markSeen(p.id);
     return;
+  }
+
+  // The DOM sometimes yields empty text (lazy render / markup change) → fall back to the
+  // canonical tweet text from the syndication API so the classifier has something to read.
+  if (text1.length < 5) {
+    try {
+      const j = await fetchSyndication(p.id);
+      if (j && j.text) text1 = String(j.text).replace(/\s+/g, " ").trim();
+    } catch (_) {}
   }
 
   // 1) found a fresh video post from the handle — show its FULL text
@@ -138,7 +147,7 @@ async function handlePost(p, handle) {
   // 2) classify the text — ALWAYS echo the text with the verdict so you can cross-check
   let v;
   try {
-    v = await classifyGoal(p.text, cfg.llmApiKey, cfg.llmModel);
+    v = await classifyGoal(text1, cfg.llmApiKey, cfg.llmModel);
   } catch (e) {
     log("classify", false, p.id, "LLM error: " + e.message + " (will retry)");
     return;
@@ -173,7 +182,7 @@ async function handlePost(p, handle) {
 
   // 4) upload to the server
   try {
-    const r = await uploadClip(p.id, handle, p.text, v, clip.blob);
+    const r = await uploadClip(p.id, handle, text1, v, clip.blob);
     log("upload", true, p.id, r?.duplicate ? "server already had it" : `uploaded → clip id ${r?.id}`);
     markSeen(p.id);
   } catch (e) {

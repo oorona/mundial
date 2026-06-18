@@ -1,6 +1,6 @@
 {
   "name": "fox-goal-poller",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "description": "Headless background poller: watches Fox X account(s) for goal clips and uploads them to the Mundial server. Immune to screen lock (no visible browser).",
