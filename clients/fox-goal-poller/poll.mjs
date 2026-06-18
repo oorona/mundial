@@ -124,10 +124,12 @@ async function handlePost(p, handle) {
   if (seen.has(p.id)) return;
   if (handle.toLowerCase() !== p.handle.toLowerCase()) return;
   if (!p.video) return;
+  // Every per-post log line carries the channel (@handle) it was found on.
+  const plog = (stage, ok, detail) => log(stage, ok, p.id, `@${handle} ${detail}`);
   let text1 = (p.text || "").replace(/\s+/g, " ").trim();
   if (p.time && Date.now() - Date.parse(p.time) > maxAgeMs) {
     const age = Math.round((Date.now() - Date.parse(p.time)) / 60000);
-    console.log(`[fgp]   ⏭  old video (${age}min) skipped: "${text1.slice(0, 70)}"`);
+    console.log(`[fgp]   ⏭  @${handle} old video (${age}min) skipped: "${text1.slice(0, 70)}"`);
     markSeen(p.id);
     return;
   }
@@ -141,25 +143,25 @@ async function handlePost(p, handle) {
     } catch (_) {}
   }
 
-  // 1) found a fresh video post from the handle — show its FULL text
-  log("video", true, p.id, `found video — "${text1.slice(0, 500)}"`);
+  // 1) found a fresh video post on this channel — show its FULL text
+  plog("video", true, `found video — "${text1.slice(0, 500)}"`);
 
   // 2) classify the text — ALWAYS echo the text with the verdict so you can cross-check
   let v;
   try {
     v = await classifyGoal(text1, cfg.llmApiKey, cfg.llmModel);
   } catch (e) {
-    log("classify", false, p.id, "LLM error: " + e.message + " (will retry)");
+    plog("classify", false, "LLM error: " + e.message + " (will retry)");
     return;
   }
   const conf = Number(v?.confidence ?? 0);
   if (!v || !v.is_goal || conf < threshold) {
-    log("classify", false, p.id,
+    plog("classify", false,
       `NOT a goal (is_goal=${v?.is_goal}, conf=${conf.toFixed(2)}) — TEXT: "${text1.slice(0, 500)}"`);
     markSeen(p.id);
     return;
   }
-  log("GOAL", true, p.id,
+  plog("GOAL", true,
     `GOAL ✓ ${v.home_team || "?"}${v.away_team ? " vs " + v.away_team : ""}` +
     `${v.scorer ? " — " + v.scorer : ""}${v.scoring_team ? " [scored: " + v.scoring_team + "]" : ""}` +
     ` (conf ${conf.toFixed(2)}) — TEXT: "${text1.slice(0, 300)}"`);
@@ -169,24 +171,24 @@ async function handlePost(p, handle) {
   try {
     clip = await downloadBestClip(p.id);
   } catch (e) {
-    log("download", false, p.id, "error: " + e.message);
+    plog("download", false, "error: " + e.message);
     markSeen(p.id);
     return;
   }
   if (!clip || !clip.blob) {
-    log("download", false, p.id, "no mp4 variant (HLS-only?) — skipped");
+    plog("download", false, "no mp4 variant (HLS-only?) — skipped");
     markSeen(p.id);
     return;
   }
-  log("download", true, p.id, `got clip ${(clip.bytes / 1048576).toFixed(2)} MB`);
+  plog("download", true, `got clip ${(clip.bytes / 1048576).toFixed(2)} MB`);
 
   // 4) upload to the server
   try {
     const r = await uploadClip(p.id, handle, text1, v, clip.blob);
-    log("upload", true, p.id, r?.duplicate ? "server already had it" : `uploaded → clip id ${r?.id}`);
+    plog("upload", true, r?.duplicate ? "server already had it" : `uploaded → clip id ${r?.id}`);
     markSeen(p.id);
   } catch (e) {
-    log("upload", false, p.id, e.message + " (will retry)");
+    plog("upload", false, e.message + " (will retry)");
   }
 }
 
