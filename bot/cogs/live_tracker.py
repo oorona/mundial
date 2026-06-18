@@ -483,8 +483,9 @@ class LiveTracker(commands.Cog):
 
     async def _translate_caption(self, text_en: str) -> str:
         """Translate a Fox post's English text to Spanish for the channel caption. Returns
-        the original text on any error/empty so a clip is never dropped over translation."""
-        src = (text_en or "").strip()
+        the original text on any error/empty so a clip is never dropped over translation.
+        Strips the trailing t.co share URL Fox appends (noise in a Discord caption)."""
+        src = re.sub(r"\s*https?://\S+", "", (text_en or "")).strip()
         if not src:
             return ""
         provider = self.llm.providers.get("google") if (self.llm and self.llm.providers) else None
@@ -521,12 +522,14 @@ class LiveTracker(commands.Cog):
                 pass
             return
         file_path = None
+        row_text = ""
         try:
             async with self.db.worker_session() as s:
                 row = (await s.execute(
-                    text("SELECT file_path FROM goal_clips WHERE id=:i"), {"i": clip_id})).mappings().first()
+                    text("SELECT file_path, text FROM goal_clips WHERE id=:i"), {"i": clip_id})).mappings().first()
                 if row:
                     file_path = row["file_path"]
+                    row_text = row["text"] or ""
                 await s.execute(
                     text("UPDATE goal_clips SET status='posted', posted_at=now() WHERE id=:i"),
                     {"i": clip_id})
@@ -536,8 +539,11 @@ class LiveTracker(commands.Cog):
         if not file_path or not os.path.exists(file_path):
             log.warning("live_tracker: clip %s file missing — skipping", clip_id)
             return
-        es = await self._translate_caption(clip.get("text") or "")
+        # Prefer the text from the Redis payload; fall back to the goal_clips row (always
+        # populated at ingest) so a missing/older payload never yields an empty caption.
+        es = await self._translate_caption(clip.get("text") or row_text)
         cap = f"🎥 {es}" if es else "🎥 ⚽"
+        log.info("live_tracker: relaying clip %s — %r", clip_id, cap[:90])
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
             if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
