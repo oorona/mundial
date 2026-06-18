@@ -5,16 +5,16 @@
 // goal check + syndication download + upload as the extension (clip-core.js). No visible
 // window, so the OS screen lock has no effect — it runs as long as the PC is awake.
 
-import { chromium } from "playwright";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { classifyGoal, downloadBestClip } from "./clip-core.js";
+import { launchContext } from "./browser.mjs";
 
 if (!existsSync("config.json")) {
   console.error("Missing config.json — copy config.example.json to config.json and fill it in.");
   process.exit(1);
 }
-if (!existsSync("auth.json")) {
-  console.error("Missing auth.json — run:  node login.mjs   (one-time X login).");
+if (!existsSync("profile")) {
+  console.error("Not logged in — run:  node login.mjs   (one-time X login).");
   process.exit(1);
 }
 
@@ -142,14 +142,8 @@ async function handlePost(p, handle) {
 }
 
 (async () => {
-  const browser = await chromium.launch({ headless: true });
-  const ctx = await browser.newContext({
-    storageState: "auth.json",
-    viewport: { width: 1280, height: 1600 },
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  });
-  const page = await ctx.newPage();
+  const ctx = await launchContext(true); // headless
+  const page = ctx.pages()[0] || (await ctx.newPage());
   console.log(`[fgp] watching ${handles.map((h) => "@" + h).join(", ")} every ${pollMs / 1000}s → ${base}`);
   log("watching", true, "", `@${handles.join(", @")}`);
 

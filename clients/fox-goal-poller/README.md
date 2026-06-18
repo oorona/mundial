@@ -28,6 +28,12 @@ Use this instead of the browser extension when the machine's screen locks.
    npm install
    npx playwright install chromium
    ```
+   (The poller drives your **system Microsoft Edge** to avoid X's automation block;
+   Chromium above is just a fallback if Edge isn't found.)
+
+   > **If `npm`/`npx` errors with "running scripts is disabled"** — that's PowerShell's
+   > policy. Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (press Y), or use
+   > Command Prompt (`cmd.exe`) instead of PowerShell.
 
 4. **Create your config:** copy `config.example.json` to `config.json` and fill it in:
    ```
@@ -40,11 +46,16 @@ Use this instead of the browser extension when the machine's screen locks.
    - `handles` — the Fox accounts to watch, e.g. `["FOXSports", "FOXSoccer", "FIFAWorldCup"]`
    - `maxAgeMinutes` / `pollSeconds` / `threshold` — leave the defaults unless you want to tune.
 
-5. **Log into X once** (opens a real browser; log in, then press Enter in PowerShell):
+5. **Log into X once** (opens Edge; log in, then press Enter in PowerShell):
    ```
    node login.mjs
    ```
-   This saves your session to `auth.json` so the headless poller stays logged in.
+   The session is kept in a local `profile\` folder so the headless poller stays logged in.
+
+   > **If X still says "this browser may not be secure":** log into x.com normally in your
+   > everyday browser first, then re-run `node login.mjs` (it reuses your Edge profile and
+   > the automation markers are already stripped). If it *still* blocks, tell me and I'll
+   > switch the login to import cookies from your normal browser instead.
 
 ## Run it
 
@@ -84,6 +95,6 @@ Double-click `run.bat` (or add a shortcut to it in `shell:startup` so it launche
 - **X may change its frontend.** Detection uses the same selectors as the extension
   (`article`, `/handle/status/id`, `data-testid="videoComponent"`); if it stops finding
   posts, those selectors in `poll.mjs` are the first thing to update.
-- **Keys stay local** in `config.json` / `auth.json` (git-ignored). Nothing is sent anywhere
-  except Google (classification) and your own server (upload).
+- **Keys/session stay local** in `config.json` / the `profile\` folder (git-ignored).
+  Nothing is sent anywhere except Google (classification) and your own server (upload).
 - HLS-only videos (no MP4 variant) are skipped, same as the extension.
