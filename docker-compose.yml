@@ -43,13 +43,13 @@ services:
       - platform_data:/data
       - ./data/prompts:/data/prompts
       - ./scripts:/scripts:ro
-    # Horizontally scaled: 5 backend instances behind Traefik (/api router) and the
-    # Docker DNS alias ${APP_NAME}-backend (both round-robin across replicas). One uvicorn
-    # worker per replica → exactly 5 API instances. The backend is stateless (state lives
-    # in Postgres/Redis) and never runs migrations on boot, so replicas are safe.
+    # Behind Traefik (/api router) and the Docker DNS alias ${APP_NAME}-backend. One uvicorn
+    # worker per replica. The backend is stateless (state lives in Postgres/Redis) and never
+    # runs migrations on boot, so the replica count is safe to change. Single instance — the
+    # user base is small; scale `replicas` up here if load grows.
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
     deploy:
-      replicas: 5
+      replicas: 1
     restart: always
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/api/v1/health" ]
