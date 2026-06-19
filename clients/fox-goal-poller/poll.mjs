@@ -7,7 +7,7 @@
 // No visible window, so the OS screen lock has no effect — it runs as long as the PC is awake.
 
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { downloadBestClip, fetchSyndication } from "./clip-core.js";
+import { downloadBestClip } from "./clip-core.js";
 import { launchContext } from "./browser.mjs";
 
 // Print the version first thing, so you can confirm you're running the latest build.
@@ -91,6 +91,15 @@ async function activeWindow() {
 async function scrape(page, handle) {
   await page.goto(`https://x.com/${handle}`, { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.waitForTimeout(3500); // let the timeline render
+  // X lazy-loads posts (and their video players) as you scroll. Without this, only the
+  // top ~13 posts render and below-the-fold clips are missed. Scroll down a few screens to
+  // pull in more posts, then return to the top.
+  for (let i = 0; i < 5; i++) {
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+    await page.waitForTimeout(900);
+  }
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(400);
   return await page.$$eval("article", (arts) =>
     arts
       .map((art) => {
@@ -116,47 +125,38 @@ async function scrape(page, handle) {
 async function handlePost(p, handle) {
   if (seen.has(p.id)) return;
   if (handle.toLowerCase() !== p.handle.toLowerCase()) return;
-  if (!p.video) return;
   // Every per-post log line carries the channel (@handle) it was found on.
   const plog = (stage, ok, detail) => log(stage, ok, p.id, `@${handle} ${detail}`);
   let text1 = (p.text || "").replace(/\s+/g, " ").trim();
   if (p.time && Date.now() - Date.parse(p.time) > maxAgeMs) {
     const age = Math.round((Date.now() - Date.parse(p.time)) / 60000);
-    console.log(`[fgp]   ⏭  @${handle} old video (${age}min) skipped: "${text1.slice(0, 70)}"`);
+    console.log(`[fgp]   ⏭  @${handle} old post (${age}min) skipped: "${text1.slice(0, 70)}"`);
     markSeen(p.id);
     return;
   }
 
-  // The DOM sometimes yields empty text (lazy render / markup change) → fall back to the
-  // canonical tweet text from the syndication API so the classifier has something to read.
-  if (text1.length < 5) {
-    try {
-      const j = await fetchSyndication(p.id);
-      if (j && j.text) text1 = String(j.text).replace(/\s+/g, " ").trim();
-    } catch (_) {}
-  }
-
-  // 1) found a fresh video post on this channel — show its FULL text. No classification:
-  //    relay every Fox video during the game window; the server captions it in Spanish.
-  plog("video", true, `found video — "${text1.slice(0, 500)}"`);
-
-  // 2) download the mp4
+  // Decide "is this a video?" from the SYNDICATION API, not the page DOM. X lazy-loads
+  // video players, so the DOM's video flag silently misses clips that aren't scrolled into
+  // view — that dropped real goal clips. downloadBestClip resolves the tweet's mp4 (and its
+  // canonical text) regardless of what rendered. No mp4 variant → it's not a video → skip.
   let clip;
   try {
     clip = await downloadBestClip(p.id);
   } catch (e) {
-    plog("download", false, "error: " + e.message);
-    markSeen(p.id);
-    return;
+    plog("download", false, "error: " + e.message + " (will retry)");
+    return; // leave UN-seen so a later scan retries
   }
   if (!clip || !clip.blob) {
-    plog("download", false, "no mp4 variant (HLS-only?) — skipped");
-    markSeen(p.id);
+    markSeen(p.id); // not a video post (text/image, or HLS-only) — done with it, quietly
     return;
   }
+  // Prefer the page text; fall back to the syndication text (downloadBestClip returns it).
+  if (text1.length < 5 && clip.text) text1 = String(clip.text).replace(/\s+/g, " ").trim();
+
+  plog("video", true, `found video — "${text1.slice(0, 500)}"`);
   plog("download", true, `got clip ${(clip.bytes / 1048576).toFixed(2)} MB`);
 
-  // 3) upload to the server (video + text only)
+  // Upload to the server (video + text only — the server vets/translates/posts).
   try {
     const r = await uploadClip(p.id, handle, text1, clip.blob);
     plog("upload", true, r?.duplicate ? "server already had it" : `uploaded → clip id ${r?.id}`);
