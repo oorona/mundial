@@ -88,38 +88,44 @@ async function activeWindow() {
 }
 
 // ── read the visible posts on a profile (same selectors as content.js) ───────
+// X's timeline is VIRTUALIZED: it mounts only the posts near the viewport and unmounts the
+// rest. So a single scrape catches whatever ~handful is on screen at that instant — clips
+// scroll in and out of the DOM before we read them. We must scroll down step by step and
+// ACCUMULATE the posts seen at each step (deduped by id), never scrape just once.
 async function scrape(page, handle) {
   await page.goto(`https://x.com/${handle}`, { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.waitForTimeout(3500); // let the timeline render
-  // X lazy-loads posts (and their video players) as you scroll. Without this, only the
-  // top ~13 posts render and below-the-fold clips are missed. Scroll down a few screens to
-  // pull in more posts, then return to the top.
-  for (let i = 0; i < 5; i++) {
-    await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-    await page.waitForTimeout(900);
-  }
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(400);
-  return await page.$$eval("article", (arts) =>
+
+  const EXTRACT = (arts) =>
     arts
       .map((art) => {
         const links = [...art.querySelectorAll('a[href*="/status/"]')];
         const link = links.find((a) => a.querySelector("time")) || links[0];
         const m = link && link.getAttribute("href").match(/^\/([^/]+)\/status\/(\d+)/);
         if (!m) return null;
-        const video = !!art.querySelector('[data-testid="videoComponent"], [data-testid="videoPlayer"], video');
         const textEl = art.querySelector('[data-testid="tweetText"]');
         const timeEl = art.querySelector("time[datetime]");
         return {
           handle: m[1],
           id: m[2],
-          video,
           text: textEl ? textEl.innerText : "",
           time: timeEl ? timeEl.getAttribute("datetime") : null,
         };
       })
-      .filter(Boolean)
-  );
+      .filter(Boolean);
+
+  const byId = new Map();
+  let lastY = -1;
+  for (let i = 0; i < 12; i++) {
+    const batch = await page.$$eval("article", EXTRACT);
+    for (const p of batch) if (!byId.has(p.id)) byId.set(p.id, p);
+    await page.evaluate(() => window.scrollBy(0, Math.round(window.innerHeight * 1.5)));
+    await page.waitForTimeout(800);
+    const y = await page.evaluate(() => window.scrollY);
+    if (y === lastY) break; // reached the bottom — nothing more to load
+    lastY = y;
+  }
+  return [...byId.values()];
 }
 
 async function handlePost(p, handle) {
@@ -195,16 +201,17 @@ async function handlePost(p, handle) {
     for (const handle of handles) {
       try {
         const posts = await scrape(page, handle);
-        const vids = posts.filter((p) => p.video).length;
-        // Per-scan heartbeat so it's obvious it's alive and reading the timeline.
+        const fresh = posts.filter((p) => !seen.has(p.id)).length;
+        // Per-scan heartbeat so it's obvious it's alive and reading the timeline. "new" =
+        // not yet processed (video detection now happens per-post via the syndication API).
         const t = new Date().toISOString().slice(11, 19);
-        console.log(`[fgp] ${t} scan @${handle}: ${posts.length} posts, ${vids} with video`);
+        console.log(`[fgp] ${t} scan @${handle}: ${posts.length} posts (${fresh} new)`);
         if (posts.length === 0) {
           console.log(`[fgp]   ↳ 0 posts — X may be showing a login wall to the headless browser (re-check your session)`);
         }
         // Mirror a heartbeat to the server at most every 5 min (don't flood the log).
         if (Date.now() - lastMirror > 300000) {
-          log("scan", posts.length > 0, "", `@${handle}: ${posts.length} posts, ${vids} video`);
+          log("scan", posts.length > 0, "", `@${handle}: ${posts.length} posts (${fresh} new)`);
           lastMirror = Date.now();
         }
         for (const p of posts) await handlePost(p, handle);
