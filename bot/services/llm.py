@@ -41,6 +41,8 @@ from .gemini import (
 from sqlalchemy import Column, String, BigInteger, Float, DateTime, select, text
 from sqlalchemy.orm import declarative_base
 
+from .pricing import resolve_pricing, compute_cost
+
 # Define Base for database models if not imported
 Base = declarative_base()
 
@@ -600,17 +602,18 @@ class LLMService:
                 # Trusted internal telemetry write — bypass RLS so the cost row is
                 # never rejected (the bot's session sets no current_guild_id).
                 await session.execute(text("SET LOCAL app.bypass_guild_rls = 'true'"))
-                cost = 0.0
-                pricing = (
-                    await session.execute(
-                        select(LLMModelPricing).where(LLMModelPricing.model == model)
-                    )
-                ).scalar_one_or_none()
-                if pricing:
-                    cost = ((prompt_tokens or 0) / 1000.0) * (pricing.input_cost_per_1k or 0.0)
-                    cost += ((completion_tokens or 0) / 1000.0) * (pricing.output_cost_per_1k or 0.0)
-                    if image_count:
-                        cost += (image_count or 0) * (pricing.image_cost or 0.0)
+                # Resolve price by (provider, model) via the shared helper — same
+                # keying and cost formula as the backend, so the bot and backend
+                # never price the same call differently.
+                pricing = await resolve_pricing(session, LLMModelPricing, provider, model)
+                cost = compute_cost(
+                    pricing,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    thoughts_tokens=thoughts_tokens,
+                    cached_tokens=cached_tokens,
+                    image_count=image_count,
+                )
                 total = (prompt_tokens or 0) + (completion_tokens or 0) + (thoughts_tokens or 0)
                 session.add(LLMUsage(
                     guild_id=guild_id, user_id=user_id, provider=provider, model=model or "default",
@@ -1045,6 +1048,21 @@ class LLMService:
                 # Trusted internal telemetry write — bypass RLS so the cost row is
                 # never rejected (the bot's session sets no current_guild_id).
                 await session.execute(text("SET LOCAL app.bypass_guild_rls = 'true'"))
+                # Price from llm_model_pricing via the shared helper rather than
+                # trusting usage.estimated_cost (which is 0 when the provider doesn't
+                # compute it) — this is the path Gemini text/image/audio calls take.
+                image_count = getattr(usage, "image_count", 0) or 0
+                audio_seconds = getattr(usage, "audio_duration_seconds", 0.0) or 0.0
+                pricing = await resolve_pricing(session, LLMModelPricing, "google", usage.model)
+                cost = compute_cost(
+                    pricing,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    thoughts_tokens=usage.thoughts_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    image_count=image_count,
+                    audio_duration_seconds=audio_seconds,
+                )
                 usage_record = LLMUsage(
                     guild_id=guild_id,
                     user_id=user_id,
@@ -1055,7 +1073,7 @@ class LLMService:
                     thoughts_tokens=usage.thoughts_tokens,
                     cached_tokens=usage.cached_tokens,
                     tokens=usage.total_tokens,
-                    cost=usage.estimated_cost,
+                    cost=cost,
                     capability_type=usage.capability_type.value if usage.capability_type else None,
                     request_type=usage.capability_type.value if usage.capability_type else "text",
                     latency=usage.latency_ms / 1000,

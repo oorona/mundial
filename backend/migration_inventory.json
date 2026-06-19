@@ -1,6 +1,6 @@
 {
   "_comment": "Source of truth for framework and plugin migration versions. Written by install_plugin.sh (plugin section) and updated manually by framework developers (framework section). Never hardcode this data in version.py.",
-  "framework_version": "1.7.0",
+  "framework_version": "1.8.0",
   "framework_migrations": [
     {
       "version": "1.0.0",
@@ -67,6 +67,14 @@
         "e5f6a7b8c9d0"
       ],
       "head_revision": "e5f6a7b8c9d0"
+    },
+    {
+      "version": "1.8.0",
+      "description": "LLM cost tracking — composite UNIQUE(provider, model) on llm_model_pricing, seed default per-1k pricing (incl. per-provider default), and backfill cost on zero-cost historical llm_usage rows. Ported from baseline a8b9c0d1e2f3; down_revision re-pointed from c1d2e3f4a5b6 (= ai_player here) to the framework 1.7.0 head e5f6a7b8c9d0.",
+      "revisions": [
+        "a8b9c0d1e2f3"
+      ],
+      "head_revision": "a8b9c0d1e2f3"
     }
   ],
   "plugin_migrations": [

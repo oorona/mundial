@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, BigInteger, Boolean, DateTime, ForeignKey, Enum as SQLEnum, Text, JSON, Float, Integer
+from sqlalchemy import Column, String, BigInteger, Boolean, DateTime, ForeignKey, Enum as SQLEnum, Text, JSON, Float, Integer, UniqueConstraint
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
 import enum
@@ -148,10 +148,14 @@ class LLMUsage(Base):
 
 class LLMModelPricing(Base):
     __tablename__ = "llm_model_pricing"
+    # Uniqueness is on (provider, model), not model alone: each provider owns its
+    # own rows including a "default" catch-all (resolved by the pricing helper),
+    # and two providers may legitimately expose the same model name.
+    __table_args__ = (UniqueConstraint("provider", "model", name="uq_llm_model_pricing_provider_model"),)
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     provider = Column(String, nullable=False)
-    model = Column(String, nullable=False, unique=True)
+    model = Column(String, nullable=False)
     input_cost_per_1k = Column(Float, default=0.0)
     output_cost_per_1k = Column(Float, default=0.0)
     cached_cost_per_1k = Column(Float, default=0.0)  # Discounted rate for cached tokens

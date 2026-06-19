@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 from app.core.config import settings
 from app.core.dynamic_settings import get_dynamic_setting
 from app.models import LLMUsage, LLMModelPricing
+from app.services.pricing import resolve_pricing, compute_cost
 
 # Optional imports - these providers may not be installed
 try:
@@ -283,21 +284,19 @@ class LLMService:
     async def _track_usage(self, db: Session, user_id: int, guild_id: Optional[int], provider: str, model: str, usage: Dict[str, int], context_id: str = None, request_type: Optional[str] = None, image_count: int = 0):
         """Track LLM usage in the database (text, structured, image, embeddings)."""
         try:
-            # 1. Calculate Cost — token cost plus per-image cost for image generation.
-            pricing_stmt = select(LLMModelPricing).where(
-                LLMModelPricing.provider == provider,
-                LLMModelPricing.model == model
+            # 1. Calculate Cost — resolved via the shared pricing helper so the bot
+            #    and backend price identical calls identically (tolerant of alias /
+            #    preview / dated model names, with a (provider, "default") fallback).
+            pricing = await resolve_pricing(db, LLMModelPricing, provider, model)
+            cost = compute_cost(
+                pricing,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                thoughts_tokens=usage.get("thoughts_tokens", 0),
+                cached_tokens=usage.get("cached_tokens", 0),
+                image_count=image_count,
+                audio_duration_seconds=usage.get("audio_duration_seconds", 0.0),
             )
-            result = await db.execute(pricing_stmt)
-            pricing = result.scalar_one_or_none()
-
-            cost = 0.0
-            if pricing:
-                input_cost = (usage.get("prompt_tokens", 0) / 1000) * (pricing.input_cost_per_1k or 0.0)
-                output_cost = (usage.get("completion_tokens", 0) / 1000) * (pricing.output_cost_per_1k or 0.0)
-                cost = input_cost + output_cost
-                if image_count:
-                    cost += image_count * (pricing.image_cost or 0.0)
 
             # 2. Set guild RLS context when writing to guild-scoped llm_usage table.
             #    The session comes from get_db (bypass=true); if a guild is known we must
@@ -316,8 +315,11 @@ class LLMService:
                 tokens=usage.get("total_tokens", 0),
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
+                thoughts_tokens=usage.get("thoughts_tokens", 0),
+                cached_tokens=usage.get("cached_tokens", 0),
                 cost=cost,
                 image_count=image_count or 0,
+                audio_duration_seconds=usage.get("audio_duration_seconds", 0.0),
                 request_type=request_type or ("chat" if context_id else "text"),
             )
             db.add(record)

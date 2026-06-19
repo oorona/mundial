@@ -126,7 +126,12 @@ async def lifespan(app: FastAPI):
     if not SETUP_MODE:
         logger.info("Running Alembic database migrations...")
         run_alembic_migrations()
-    
+
+        # Seed default LLM model pricing (idempotent — ON CONFLICT DO NOTHING).
+        # Without this, llm_model_pricing is empty and every llm_usage.cost is 0.
+        from app.core.pricing_seed import seed_llm_pricing
+        await seed_llm_pricing()
+
     # Start heartbeat task
     task = asyncio.create_task(send_heartbeats())
     

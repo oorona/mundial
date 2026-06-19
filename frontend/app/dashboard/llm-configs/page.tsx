@@ -36,9 +36,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { withPermission } from '@/lib/components/with-permission';
 import { PermissionLevel } from '@/lib/permissions';
-import { apiClient } from '@/app/api-client';
+import { apiClient, ModelPricing } from '@/app/api-client';
 
-type Tab = 'schemas' | 'functions' | 'logs' | 'try-structured' | 'try-tools' | 'plugin-prompts';
+type Tab = 'schemas' | 'functions' | 'logs' | 'try-structured' | 'try-tools' | 'plugin-prompts' | 'pricing';
 
 interface SchemaEntry {
   id: string;
@@ -149,6 +149,17 @@ function LLMConfigsPage() {
   const [promptSaving, setPromptSaving] = useState(false);
   // Which contexts are expanded in the sidebar
   const [expandedContexts, setExpandedContexts] = useState<Set<string>>(new Set());
+
+  // Model Pricing — rows that drive llm_usage cost. Blank/empty = no cost tracking.
+  const EMPTY_PRICING: ModelPricing = {
+    provider: '', model: '', input_cost_per_1k: 0, output_cost_per_1k: 0,
+    cached_cost_per_1k: 0, image_cost: 0, audio_cost_per_minute: 0, is_active: true,
+  };
+  const [pricing, setPricing] = useState<ModelPricing[]>([]);
+  const [pricingLoading, setPricingLoading] = useState(false);
+  const [pricingDraft, setPricingDraft] = useState<ModelPricing | null>(null);
+  const [pricingMsg, setPricingMsg] = useState('');
+  const [pendingDeletePricing, setPendingDeletePricing] = useState<number | null>(null);
 
   // Pending delete confirmations
   const [pendingDeleteSchema, setPendingDeleteSchema] = useState<string | null>(null);
@@ -288,10 +299,50 @@ function LLMConfigsPage() {
     });
   };
 
+  const loadPricing = useCallback(async () => {
+    setPricingLoading(true);
+    try {
+      const data = await apiClient.listModelPricing();
+      setPricing(data.pricing || []);
+    } catch {
+      setPricingMsg('Failed to load pricing.');
+    } finally {
+      setPricingLoading(false);
+    }
+  }, []);
+
+  const savePricing = async () => {
+    if (!pricingDraft) return;
+    if (!pricingDraft.provider.trim() || !pricingDraft.model.trim()) {
+      setPricingMsg('Provider and model are required.');
+      return;
+    }
+    setPricingMsg('');
+    try {
+      await apiClient.upsertModelPricing(pricingDraft);
+      setPricingDraft(null);
+      await loadPricing();
+      setPricingMsg('Saved.');
+    } catch {
+      setPricingMsg('Save failed.');
+    }
+  };
+
+  const deletePricing = async (id: number) => {
+    try {
+      await apiClient.deleteModelPricing(id);
+      setPendingDeletePricing(null);
+      await loadPricing();
+    } catch {
+      setPricingMsg('Delete failed.');
+    }
+  };
+
   useEffect(() => { loadSchemas(); }, [loadSchemas]);
   useEffect(() => { loadFunctionSets(); }, [loadFunctionSets]);
   useEffect(() => { if (tab === 'logs') loadLogs(); }, [tab, loadLogs]);
   useEffect(() => { if (tab === 'plugin-prompts') loadPluginPrompts(); }, [tab, loadPluginPrompts]);
+  useEffect(() => { if (tab === 'pricing') loadPricing(); }, [tab, loadPricing]);
 
   // ── Schema editor handlers ────────────────────────────────────────────────
 
@@ -430,6 +481,7 @@ function LLMConfigsPage() {
           { id: 'schemas',        label: 'Output Schemas' },
           { id: 'functions',      label: 'Function Sets' },
           { id: 'plugin-prompts', label: 'Plugin Prompts' },
+          { id: 'pricing',        label: 'Model Pricing' },
           { id: 'logs',           label: 'LLM Call Logs' },
           { id: 'try-structured', label: '▶ Try: Structured Output' },
           { id: 'try-tools',      label: '▶ Try: Function Calling' },
@@ -916,6 +968,114 @@ function LLMConfigsPage() {
                   on the host. Bot reads this file on each call — no restart required.
                 </p>
               </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Model Pricing Tab ── */}
+      {tab === 'pricing' && (
+        <div className="space-y-4">
+          <p className="text-muted-foreground text-sm">
+            Per-1K-token pricing that drives <code className="text-violet-600 dark:text-violet-400">llm_usage.cost</code> and the
+            AI Analytics page. Rows are keyed by (provider, model); a <code className="text-violet-600 dark:text-violet-400">default</code> model
+            per provider is the catch-all used when no exact/aliased match is found. Defaults are seeded on startup — edit them here to match your billing.
+          </p>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => { setPricingDraft({ ...EMPTY_PRICING }); setPricingMsg(''); }}
+              className="px-4 py-2 text-sm rounded-md bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors"
+            >
+              + Add Pricing Row
+            </button>
+            {pricingMsg && <span className="text-sm text-muted-foreground">{pricingMsg}</span>}
+          </div>
+
+          {pricingDraft && (
+            <div className="bg-card border border-border rounded-lg p-4 space-y-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {([
+                  ['provider', 'Provider', 'text'],
+                  ['model', 'Model', 'text'],
+                  ['input_cost_per_1k', 'Input / 1K', 'number'],
+                  ['output_cost_per_1k', 'Output / 1K', 'number'],
+                  ['cached_cost_per_1k', 'Cached / 1K', 'number'],
+                  ['image_cost', 'Image / unit', 'number'],
+                  ['audio_cost_per_minute', 'Audio / min', 'number'],
+                ] as [keyof ModelPricing, string, string][]).map(([key, label, type]) => (
+                  <label key={key} className="text-xs text-muted-foreground space-y-1">
+                    <span>{label}</span>
+                    <input
+                      type={type}
+                      step={type === 'number' ? 'any' : undefined}
+                      value={String(pricingDraft[key] ?? '')}
+                      onChange={(e) => setPricingDraft({
+                        ...pricingDraft,
+                        [key]: type === 'number' ? parseFloat(e.target.value || '0') : e.target.value,
+                      })}
+                      className="w-full px-2 py-1.5 rounded-md border border-border bg-background text-foreground text-sm font-mono"
+                    />
+                  </label>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={savePricing}
+                  className="px-4 py-2 text-sm rounded-md bg-green-600 hover:bg-green-700 text-white font-medium transition-colors">
+                  Save
+                </button>
+                <button onClick={() => setPricingDraft(null)}
+                  className="px-4 py-2 text-sm rounded-md border border-border text-foreground hover:bg-muted transition-colors">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-card border border-border rounded-lg overflow-x-auto">
+            {pricingLoading ? (
+              <div className="p-4 text-sm text-muted-foreground">Loading…</div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-muted/30">
+                  <tr>
+                    {['Provider', 'Model', 'Input/1K', 'Output/1K', 'Cached/1K', 'Image', 'Audio/min', ''].map((h) => (
+                      <th key={h} className="text-left p-3 font-medium text-muted-foreground">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {pricing.map((p) => (
+                    <tr key={p.id} className="border-t border-border hover:bg-muted/30 transition-colors">
+                      <td className="p-3 capitalize text-foreground">{p.provider}</td>
+                      <td className="p-3 font-mono text-foreground">{p.model}</td>
+                      <td className="p-3 text-foreground">${p.input_cost_per_1k}</td>
+                      <td className="p-3 text-foreground">${p.output_cost_per_1k}</td>
+                      <td className="p-3 text-foreground">${p.cached_cost_per_1k}</td>
+                      <td className="p-3 text-foreground">${p.image_cost}</td>
+                      <td className="p-3 text-foreground">${p.audio_cost_per_minute}</td>
+                      <td className="p-3 text-right whitespace-nowrap">
+                        <button onClick={() => { setPricingDraft({ ...p }); setPricingMsg(''); }}
+                          className="text-violet-600 hover:text-violet-500 mr-3">Edit</button>
+                        {pendingDeletePricing === p.id ? (
+                          <>
+                            <button onClick={() => p.id && deletePricing(p.id)}
+                              className="text-red-500 hover:text-red-400 mr-2">Confirm</button>
+                            <button onClick={() => setPendingDeletePricing(null)}
+                              className="text-muted-foreground hover:text-foreground">Cancel</button>
+                          </>
+                        ) : (
+                          <button onClick={() => setPendingDeletePricing(p.id ?? null)}
+                            className="text-red-500 hover:text-red-400">Delete</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {pricing.length === 0 && (
+                    <tr><td colSpan={8} className="p-4 text-muted-foreground">No pricing rows.</td></tr>
+                  )}
+                </tbody>
+              </table>
             )}
           </div>
         </div>

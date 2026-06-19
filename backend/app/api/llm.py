@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_redis, get_current_user, get_llm_service, verify_platform_admin
 from app.core.limiter import limiter
-from app.models import LLMUsage, LLMUsageSummary, Guild
+from app.models import LLMUsage, LLMUsageSummary, LLMModelPricing, Guild
 from app.schemas import (
     ChatRequest,
     EmbedRequest,
@@ -478,21 +478,49 @@ async def get_stats(
     db: Session = Depends(get_db),
     admin: dict = Depends(verify_platform_admin),
 ):
-    """Get aggregated LLM usage stats (Admin Only)."""
-    total_cost_result = await db.execute(select(func.sum(LLMUsage.cost)))
-    total_cost = total_cost_result.scalar() or 0.0
+    """Get aggregated LLM usage stats (Admin Only).
 
-    total_tokens_result = await db.execute(select(func.sum(LLMUsage.tokens)))
-    total_tokens = total_tokens_result.scalar() or 0
+    Token figures are broken out input/output/thinking/cached at every level, not
+    just a single total — input and output are priced very differently, so a lone
+    total-tokens number can't be reconciled against cost.
+    """
+    totals_stmt = select(
+        func.sum(LLMUsage.cost),
+        func.sum(LLMUsage.tokens),
+        func.sum(LLMUsage.prompt_tokens),
+        func.sum(LLMUsage.completion_tokens),
+        func.sum(LLMUsage.thoughts_tokens),
+        func.sum(LLMUsage.cached_tokens),
+    )
+    t = (await db.execute(totals_stmt)).one()
+    total_cost = t[0] or 0.0
+    total_tokens = t[1] or 0
+    total_prompt_tokens = t[2] or 0
+    total_completion_tokens = t[3] or 0
+    total_thoughts_tokens = t[4] or 0
+    total_cached_tokens = t[5] or 0
 
     provider_stmt = (
-        select(LLMUsage.provider, func.sum(LLMUsage.cost), func.count(LLMUsage.id))
+        select(
+            LLMUsage.provider,
+            func.sum(LLMUsage.cost),
+            func.count(LLMUsage.id),
+            func.sum(LLMUsage.tokens),
+            func.sum(LLMUsage.prompt_tokens),
+            func.sum(LLMUsage.completion_tokens),
+            func.sum(LLMUsage.thoughts_tokens),
+            func.sum(LLMUsage.cached_tokens),
+        )
         .group_by(LLMUsage.provider)
     )
     provider_rows = await db.execute(provider_stmt)
     by_provider = [
-        {"provider": row[0], "cost": row[1], "requests": row[2]}
-        for row in provider_rows
+        {
+            "provider": r[0], "cost": r[1], "requests": r[2], "tokens": r[3],
+            "prompt_tokens": r[4], "completion_tokens": r[5],
+            "thoughts_tokens": r[6], "cached_tokens": r[7],
+        }
+        for r in provider_rows
     ]
 
     # Per-model breakdown (provider + model). The model column is always populated,
@@ -504,13 +532,21 @@ async def get_stats(
             func.sum(LLMUsage.cost),
             func.sum(LLMUsage.tokens),
             func.count(LLMUsage.id),
+            func.sum(LLMUsage.prompt_tokens),
+            func.sum(LLMUsage.completion_tokens),
+            func.sum(LLMUsage.thoughts_tokens),
+            func.sum(LLMUsage.cached_tokens),
         )
         .group_by(LLMUsage.provider, LLMUsage.model)
         .order_by(func.sum(LLMUsage.cost).desc())
     )
     model_rows = await db.execute(model_stmt)
     by_model = [
-        {"provider": r[0], "model": r[1], "cost": r[2], "tokens": r[3], "requests": r[4]}
+        {
+            "provider": r[0], "model": r[1], "cost": r[2], "tokens": r[3], "requests": r[4],
+            "prompt_tokens": r[5], "completion_tokens": r[6],
+            "thoughts_tokens": r[7], "cached_tokens": r[8],
+        }
         for r in model_rows
     ]
 
@@ -523,6 +559,10 @@ async def get_stats(
             func.sum(LLMUsage.cost),
             func.sum(LLMUsage.tokens),
             func.count(LLMUsage.id),
+            func.sum(LLMUsage.prompt_tokens),
+            func.sum(LLMUsage.completion_tokens),
+            func.sum(LLMUsage.thoughts_tokens),
+            func.sum(LLMUsage.cached_tokens),
         )
         .select_from(LLMUsage)
         .join(Guild, Guild.id == LLMUsage.guild_id, isouter=True)
@@ -537,6 +577,8 @@ async def get_stats(
             "cost": r[2],
             "tokens": r[3],
             "requests": r[4],
+            "prompt_tokens": r[5], "completion_tokens": r[6],
+            "thoughts_tokens": r[7], "cached_tokens": r[8],
         }
         for r in guild_rows
     ]
@@ -548,6 +590,10 @@ async def get_stats(
     return {
         "total_cost": total_cost,
         "total_tokens": total_tokens,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+        "total_thoughts_tokens": total_thoughts_tokens,
+        "total_cached_tokens": total_cached_tokens,
         "by_provider": by_provider,
         "by_model": by_model,
         "by_guild": by_guild,
@@ -588,3 +634,92 @@ async def purge_llm_usage(
     await db.commit()
 
     return {"deleted": usage_result.rowcount, "summaries_deleted": summary_result.rowcount}
+
+
+# --- Model Pricing (Developer) -------------------------------------------------
+# llm_model_pricing is a global (non-guild) table — use get_db, not get_guild_db.
+# These routes are not under /{guild_id}/, so the AuditLog/guild-RLS contract does
+# not apply; access is gated to platform admins (Developer level).
+
+def _pricing_to_dict(p: LLMModelPricing) -> dict:
+    return {
+        "id": p.id,
+        "provider": p.provider,
+        "model": p.model,
+        "input_cost_per_1k": p.input_cost_per_1k,
+        "output_cost_per_1k": p.output_cost_per_1k,
+        "cached_cost_per_1k": p.cached_cost_per_1k,
+        "image_cost": p.image_cost,
+        "audio_cost_per_minute": p.audio_cost_per_minute,
+        "is_active": p.is_active,
+    }
+
+
+@router.get("/pricing")
+async def list_model_pricing(
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_platform_admin),
+):
+    """List all LLM model pricing rows (Developer only)."""
+    rows = (
+        await db.execute(
+            select(LLMModelPricing).order_by(LLMModelPricing.provider, LLMModelPricing.model)
+        )
+    ).scalars().all()
+    return {"pricing": [_pricing_to_dict(p) for p in rows]}
+
+
+@router.post("/pricing")
+async def upsert_model_pricing(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_platform_admin),
+):
+    """Create or update a pricing row, keyed by (provider, model). Developer only."""
+    provider = (payload.get("provider") or "").strip()
+    model = (payload.get("model") or "").strip()
+    if not provider or not model:
+        raise HTTPException(status_code=400, detail="provider and model are required")
+
+    def _num(key: str) -> float:
+        try:
+            return float(payload.get(key) or 0.0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{key} must be a number")
+
+    existing = (
+        await db.execute(
+            select(LLMModelPricing).where(
+                LLMModelPricing.provider == provider, LLMModelPricing.model == model
+            )
+        )
+    ).scalar_one_or_none()
+
+    row = existing or LLMModelPricing(provider=provider, model=model)
+    row.input_cost_per_1k = _num("input_cost_per_1k")
+    row.output_cost_per_1k = _num("output_cost_per_1k")
+    row.cached_cost_per_1k = _num("cached_cost_per_1k")
+    row.image_cost = _num("image_cost")
+    row.audio_cost_per_minute = _num("audio_cost_per_minute")
+    row.is_active = bool(payload.get("is_active", True))
+    if existing is None:
+        db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _pricing_to_dict(row)
+
+
+@router.delete("/pricing/{pricing_id}")
+async def delete_model_pricing(
+    pricing_id: int,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(verify_platform_admin),
+):
+    """Delete a pricing row by id. Developer only."""
+    result = await db.execute(
+        sa_delete(LLMModelPricing).where(LLMModelPricing.id == pricing_id)
+    )
+    await db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Pricing row not found")
+    return {"deleted": pricing_id}

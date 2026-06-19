@@ -82,6 +82,18 @@ export interface LLMRequest {
     guild_id?: number;
 }
 
+export interface ModelPricing {
+    id?: number;
+    provider: string;
+    model: string;
+    input_cost_per_1k: number;
+    output_cost_per_1k: number;
+    cached_cost_per_1k: number;
+    image_cost: number;
+    audio_cost_per_minute: number;
+    is_active?: boolean;
+}
+
 export interface ChatRequest {
     message: string;
     context_id: string;
@@ -447,6 +459,22 @@ class APIClient {
     async purgeLLMUsage(params: { older_than_days?: number; before?: string; after?: string }) {
         const response = await this.client.delete('/llm/usage', { params });
         return response.data as { deleted: number; summaries_deleted: number };
+    }
+
+    // Model Pricing (Developer) — view/edit the llm_model_pricing rows that drive cost tracking.
+    async listModelPricing(): Promise<{ pricing: ModelPricing[] }> {
+        const response = await this.client.get('/llm/pricing');
+        return response.data;
+    }
+
+    async upsertModelPricing(body: ModelPricing): Promise<ModelPricing> {
+        const response = await this.client.post('/llm/pricing', body);
+        return response.data;
+    }
+
+    async deleteModelPricing(id: number): Promise<{ deleted: number }> {
+        const response = await this.client.delete(`/llm/pricing/${id}`);
+        return response.data;
     }
 
     // *** DEMO CODE *** - Gemini Demo Endpoints

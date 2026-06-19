@@ -7,14 +7,28 @@ import { PermissionLevel } from '@/lib/permissions';
 import { useTranslation } from '@/lib/i18n';
 import { Trash2, X } from 'lucide-react';
 
+interface TokenBreakdown {
+    tokens?: number;
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    thoughts_tokens?: number;
+    cached_tokens?: number;
+}
+
 interface LLMStats {
     total_cost: number;
     total_tokens: number;
-    by_provider: { provider: string; cost: number; requests: number }[];
-    by_model: { provider: string; model: string; cost: number; tokens: number; requests: number }[];
-    by_guild: { guild_id: string | null; guild_name: string; cost: number; tokens: number; requests: number }[];
+    total_prompt_tokens?: number;
+    total_completion_tokens?: number;
+    total_thoughts_tokens?: number;
+    total_cached_tokens?: number;
+    by_provider: ({ provider: string; cost: number; requests: number } & TokenBreakdown)[];
+    by_model: ({ provider: string; model: string; cost: number; requests: number } & TokenBreakdown)[];
+    by_guild: ({ guild_id: string | null; guild_name: string; cost: number; requests: number } & TokenBreakdown)[];
     recent_logs: any[];
 }
+
+const num = (n?: number) => (n ?? 0).toLocaleString();
 
 type PurgeMode = 'all' | 'older_than' | 'date_range';
 
@@ -168,6 +182,12 @@ function AIAnalyticsPage() {
                 <div className="bg-card rounded-lg p-6 border border-border shadow-md">
                     <h3 className="text-sm font-medium text-muted-foreground mb-2">{t('aiAnalytics.statTotalTokens')}</h3>
                     <div className="text-2xl font-bold text-foreground">{stats.total_tokens.toLocaleString()}</div>
+                    <div className="mt-2 text-xs text-muted-foreground space-y-0.5">
+                        <div>{t('aiAnalytics.statInputTokens')}: {num(stats.total_prompt_tokens)}</div>
+                        <div>{t('aiAnalytics.statOutputTokens')}: {num(stats.total_completion_tokens)}</div>
+                        <div>{t('aiAnalytics.statThinkingTokens')}: {num(stats.total_thoughts_tokens)}</div>
+                        <div>{t('aiAnalytics.statCachedTokens')}: {num(stats.total_cached_tokens)}</div>
+                    </div>
                 </div>
                 <div className="bg-card rounded-lg p-6 border border-border shadow-md">
                     <h3 className="text-sm font-medium text-muted-foreground mb-2">{t('aiAnalytics.statEstimatedCost')}</h3>
@@ -190,6 +210,9 @@ function AIAnalyticsPage() {
                                 <tr>
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colProvider')}</th>
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colRequests')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colInputTokens')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colOutputTokens')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colCachedTokens')}</th>
                                     <th className="text-right p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colCost')}</th>
                                 </tr>
                             </thead>
@@ -198,6 +221,9 @@ function AIAnalyticsPage() {
                                     <tr key={p.provider} className="border-t border-border hover:bg-muted/30 transition-colors">
                                         <td className="p-4 font-medium capitalize text-foreground">{p.provider}</td>
                                         <td className="p-4 text-foreground">{p.requests}</td>
+                                        <td className="p-4 text-foreground">{num(p.prompt_tokens)}</td>
+                                        <td className="p-4 text-foreground">{num((p.completion_tokens ?? 0) + (p.thoughts_tokens ?? 0))}</td>
+                                        <td className="p-4 text-foreground">{num(p.cached_tokens)}</td>
                                         <td className="p-4 text-right text-foreground">${p.cost.toFixed(4)}</td>
                                     </tr>
                                 ))}
@@ -219,6 +245,10 @@ function AIAnalyticsPage() {
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colProvider')}</th>
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colModel')}</th>
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colRequests')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colInputTokens')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colOutputTokens')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colThinkingTokens')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colCachedTokens')}</th>
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colTokens')}</th>
                                     <th className="text-right p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colCost')}</th>
                                 </tr>
@@ -229,7 +259,11 @@ function AIAnalyticsPage() {
                                         <td className="p-4 font-medium capitalize text-foreground">{m.provider}</td>
                                         <td className="p-4 font-mono text-sm text-foreground">{m.model}</td>
                                         <td className="p-4 text-foreground">{m.requests}</td>
-                                        <td className="p-4 text-foreground">{(m.tokens ?? 0).toLocaleString()}</td>
+                                        <td className="p-4 text-foreground">{num(m.prompt_tokens)}</td>
+                                        <td className="p-4 text-foreground">{num(m.completion_tokens)}</td>
+                                        <td className="p-4 text-foreground">{num(m.thoughts_tokens)}</td>
+                                        <td className="p-4 text-foreground">{num(m.cached_tokens)}</td>
+                                        <td className="p-4 text-foreground">{num(m.tokens)}</td>
                                         <td className="p-4 text-right text-foreground">${(m.cost ?? 0).toFixed(4)}</td>
                                     </tr>
                                 ))}
@@ -250,6 +284,8 @@ function AIAnalyticsPage() {
                                 <tr>
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colServer')}</th>
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colRequests')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colInputTokens')}</th>
+                                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colOutputTokens')}</th>
                                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colTokens')}</th>
                                     <th className="text-right p-4 text-sm font-medium text-muted-foreground">{t('aiAnalytics.colCost')}</th>
                                 </tr>
@@ -262,7 +298,9 @@ function AIAnalyticsPage() {
                                             {g.guild_id && <span className="ml-2 font-mono text-xs text-muted-foreground">{g.guild_id}</span>}
                                         </td>
                                         <td className="p-4 text-foreground">{g.requests}</td>
-                                        <td className="p-4 text-foreground">{(g.tokens ?? 0).toLocaleString()}</td>
+                                        <td className="p-4 text-foreground">{num(g.prompt_tokens)}</td>
+                                        <td className="p-4 text-foreground">{num((g.completion_tokens ?? 0) + (g.thoughts_tokens ?? 0))}</td>
+                                        <td className="p-4 text-foreground">{num(g.tokens)}</td>
                                         <td className="p-4 text-right text-foreground">${(g.cost ?? 0).toFixed(4)}</td>
                                     </tr>
                                 ))}
