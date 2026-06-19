@@ -1,7 +1,7 @@
 {
   "serverUrl": "https://mundial.mexicodev.org",
   "uploadKey": "PUT-THE-goal_clips_upload_key-HERE",
-  "handles": ["FOXSoccer"],
+  "handles": ["FOXSports", "FOXSoccer"],
   "maxAgeMinutes": 20,
   "pollSeconds": 45,
   "idleSeconds": 300
