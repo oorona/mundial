@@ -116,7 +116,7 @@ async function scrape(page, handle) {
 
   const byId = new Map();
   let lastY = -1;
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 8; i++) {
     const batch = await page.$$eval("article", EXTRACT);
     for (const p of batch) if (!byId.has(p.id)) byId.set(p.id, p);
     await page.evaluate(() => window.scrollBy(0, Math.round(window.innerHeight * 1.5)));
@@ -172,14 +172,28 @@ async function handlePost(p, handle) {
   }
 }
 
+// Recycle the headless browser every N scan-cycles to release the memory Chromium
+// accumulates over a long run (DOM, caches) — cheap insurance against a slow leak that
+// would otherwise freeze a low-RAM VM. At 45s/cycle, 20 cycles ≈ every 15 min.
+const RECYCLE_EVERY = 20;
+
 (async () => {
-  const ctx = await launchContext(true); // headless
-  const page = ctx.pages()[0] || (await ctx.newPage());
+  let { context, close } = await launchContext(true); // headless
+  let page = context.pages()[0] || (await context.newPage());
+
+  async function recycleBrowser(reason) {
+    log("recycle", true, "", `restarting browser (${reason}) to free memory`);
+    try { await close(); } catch (_) {}
+    ({ context, close } = await launchContext(true));
+    page = context.pages()[0] || (await context.newPage());
+  }
+
   console.log(`[fgp] watching ${handles.map((h) => "@" + h).join(", ")} every ${pollMs / 1000}s → ${base}`);
   log("watching", true, "", `@${handles.join(", @")}`);
 
   let lastMirror = 0;
   let active = null; // unknown until the first check → the first state is always announced
+  let cycles = 0;
   for (;;) {
     // Only work during a match window (+ buffer). Off-hours clips are ignored.
     const w = await activeWindow();
@@ -198,6 +212,7 @@ async function handlePost(p, handle) {
       await new Promise((r) => setTimeout(r, idleMs));
       continue;
     }
+    let crashed = false;
     for (const handle of handles) {
       try {
         const posts = await scrape(page, handle);
@@ -217,7 +232,13 @@ async function handlePost(p, handle) {
         for (const p of posts) await handlePost(p, handle);
       } catch (e) {
         log("scan", false, "", `scrape @${handle} failed: ${e.message}`);
+        // A page/browser crash (OOM, "Target closed") leaves the context dead — recycle it.
+        if (/closed|crash|disconnect|detached/i.test(e.message)) crashed = true;
       }
+    }
+    cycles++;
+    if (crashed || cycles % RECYCLE_EVERY === 0) {
+      await recycleBrowser(crashed ? "browser crashed" : `${RECYCLE_EVERY} cycles`);
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }

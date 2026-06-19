@@ -5,26 +5,54 @@
 //   • auth.json  — cookies imported from your normal browser by import-cookies.mjs
 //                  (use this if you sign into X with "Sign in with Google")
 // Real Edge + automation markers stripped, so X is happy either way.
+//
+// Memory: the poller only reads the timeline DOM (tweet ids + text) and downloads clips
+// via the syndication API — it NEVER plays video in the browser. So we block image/media/
+// font requests, which keeps headless Chromium's RAM/CPU flat. Without this, scrolling a
+// video-heavy timeline (e.g. @FOXSports) makes Chromium load dozens of video players and
+// balloon memory until a low-RAM VM thrashes and freezes.
 
 import { chromium } from "playwright";
 import { existsSync } from "node:fs";
 
 const ARGS = {
-  args: ["--disable-blink-features=AutomationControlled"],
+  args: [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage", // don't use the tiny /dev/shm — avoids OOM crashes on small VMs
+    "--disable-gpu",
+    "--mute-audio",
+    "--disable-background-networking",
+    "--disable-features=Translate,BackForwardCache,MediaRouter",
+  ],
   ignoreDefaultArgs: ["--enable-automation"],
 };
 
+// Abort the heavy resource types — the page never needs them for scraping.
+async function blockHeavy(context) {
+  try {
+    await context.route("**/*", (route) => {
+      const t = route.request().resourceType();
+      if (t === "image" || t === "media" || t === "font") return route.abort();
+      return route.continue();
+    });
+  } catch (_) {}
+}
+
 export async function launchContext(headless) {
-  const viewport = headless ? { width: 1280, height: 1600 } : null;
+  const viewport = headless ? { width: 1100, height: 1400 } : null;
 
   // 1) Persistent Edge login profile (from login.mjs), if present.
   if (existsSync("profile")) {
     const opts = { ...ARGS, headless, viewport };
+    let ctx;
     try {
-      return await chromium.launchPersistentContext("profile", { ...opts, channel: "msedge" });
+      ctx = await chromium.launchPersistentContext("profile", { ...opts, channel: "msedge" });
     } catch (_) {
-      return await chromium.launchPersistentContext("profile", opts);
+      ctx = await chromium.launchPersistentContext("profile", opts);
     }
+    await blockHeavy(ctx);
+    // launchPersistentContext owns its browser — close() tears the whole thing down.
+    return { context: ctx, close: () => ctx.close().catch(() => {}) };
   }
 
   // 2) Otherwise a regular context + cookies from auth.json (import-cookies.mjs).
@@ -37,5 +65,13 @@ export async function launchContext(headless) {
   }
   const ctxOpts = { viewport };
   if (existsSync("auth.json")) ctxOpts.storageState = "auth.json";
-  return await browser.newContext(ctxOpts);
+  const ctx = await browser.newContext(ctxOpts);
+  await blockHeavy(ctx);
+  return {
+    context: ctx,
+    close: async () => {
+      await ctx.close().catch(() => {});
+      await browser.close().catch(() => {});
+    },
+  };
 }
