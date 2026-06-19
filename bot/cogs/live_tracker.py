@@ -62,15 +62,15 @@ SCORE_SCHEMA = {
 # loaded at run time; SCORE_SCHEMA above is the guarded fallback (used if the row is
 # missing or an edit dropped home_score/away_score).
 # Structured output for vetting + translating a Fox clip in one call (see _caption_for_clip):
-# is it a GOAL, is it about a live match, and the plain Spanish caption.
+# is it a GOAL, WHICH live match it's about (1-based index, 0 = none), and the Spanish caption.
 CLIP_RELAY_SCHEMA = {
     "type": "object",
     "properties": {
         "is_goal": {"type": "boolean"},
-        "relevant": {"type": "boolean"},
+        "match": {"type": "integer"},
         "es": {"type": "string"},
     },
-    "required": ["is_goal", "relevant", "es"],
+    "required": ["is_goal", "match", "es"],
 }
 
 SCORE_SCHEMA_ID = "live_tracker_score"
@@ -505,50 +505,58 @@ class LiveTracker(commands.Cog):
         except Exception:
             pass
 
-    async def _caption_for_clip(self, text_en: str, live: list[dict]) -> tuple[bool, bool, str]:
+    async def _caption_for_clip(self, text_en: str, live: list[dict]) -> tuple[bool, int, str]:
         """Vet a Fox clip against the currently-live match(es) AND translate it, in one call.
 
-        Returns (is_goal, relevant, caption). A clip posts only when it is BOTH about a goal
-        being scored AND about a team playing right now — the X stream is otherwise too noisy
-        (other games, nostalgia, memes, cards/VAR, fan-cams, studio talk). The caption is the
-        plain Spanish text: no links, no @mentions, no platform references. Fails CLOSED
-        (skip) on empty text or any LLM error — the web stream still announces the goal, so a
-        dropped bonus clip is cheap; a wrong clip is what the user wants gone."""
+        Returns (is_goal, match_idx, caption). match_idx is the 1-based index (into ``live``)
+        of the match the clip is about, or 0 when it's about none of them — a DIFFERENT game,
+        a past tournament/nostalgia, a meme/promo, fan-cams or studio talk from another match.
+        is_goal flags whether a goal was scored (for routing to the goal channel). The caption
+        is plain Spanish: no links, no @mentions, no platform references. Fails CLOSED
+        ((False, 0, …) → skip) on empty text or any LLM error — the web stream still announces
+        the goal, so a dropped bonus clip is cheap; a wrong/off-topic clip is what we want gone."""
         src = re.sub(r"https?://\S+", "", text_en or "")   # links (t.co etc.)
         src = re.sub(r"@\w+", "", src)                      # @handles (X references)
         src = re.sub(r"\s+", " ", src).strip()
         if not src:
-            return (False, False, "")  # no text → can't vet → skip
-        matchups = "; ".join(f"{m.get('home_name')} vs {m.get('away_name')}" for m in (live or [])) or "(ninguno)"
+            return (False, 0, "")  # no text → can't vet → skip
+        listing = "\n".join(f"{i + 1}) {m.get('home_name')} vs {m.get('away_name')}"
+                            for i, m in enumerate(live or [])) or "(ninguno)"
         sys = (
-            "Recibes el texto de una publicación de video de una cuenta de fútbol y la lista de "
-            "PARTIDOS EN VIVO ahora mismo. Devuelve dos banderas y una traducción:\n"
+            "Recibes el texto de una publicación de video de una cuenta de fútbol y una lista "
+            "NUMERADA de PARTIDOS EN VIVO ahora mismo. Devuelve:\n"
+            "• match = el NÚMERO del partido en vivo del que trata la publicación (esos "
+            "equipos). Pon match=0 si NO trata de ninguno de los partidos listados: otro "
+            "partido o equipos, un torneo pasado o nostalgia, un meme/promoción/genérico, o "
+            "aficionados/estudio de otro juego.\n"
             "• is_goal = true SOLO si el texto describe un GOL ANOTADO (marca, anota, golazo, "
             "de cabeza, definición, doblete, hat-trick, o la repetición/jugada de ese gol). "
             "Pon is_goal=false para atajadas, tiros fallados, gol ANULADO/VAR, tarjetas, "
             "previas, entrevistas, reacciones de afición sin gol, o gráficos.\n"
-            "• relevant = true SOLO si trata de uno de los PARTIDOS EN VIVO listados (esos "
-            "equipos). Pon relevant=false si es de OTRO partido o equipos, de un torneo pasado o "
-            "nostalgia, de un meme/promoción/genérico, o de aficionados/estudio de otro juego.\n"
             "• es = la traducción al español (es-MX) como frase simple: sin comillas, sin "
             "enlaces, sin menciones (@), sin referencias a X/Twitter/Fox; conserva emojis y "
             "nombres propios."
         )
-        user = f"PARTIDOS EN VIVO AHORA: {matchups}\n\nTEXTO DE LA PUBLICACIÓN:\n{src}"
+        user = f"PARTIDOS EN VIVO AHORA:\n{listing}\n\nTEXTO DE LA PUBLICACIÓN:\n{src}"
         try:
             data = await self.llm.generate_structured(user, CLIP_RELAY_SCHEMA, system_prompt=sys)
-            if isinstance(data, dict) and "is_goal" in data and "relevant" in data:
+            if isinstance(data, dict) and "is_goal" in data and "match" in data:
                 es = str(data.get("es") or "").strip() or src
-                return (bool(data["is_goal"]), bool(data["relevant"]), es)
+                try:
+                    idx = int(data.get("match") or 0)
+                except (TypeError, ValueError):
+                    idx = 0
+                return (bool(data["is_goal"]), idx, es)
         except Exception:
             pass
-        return (False, False, src)  # fail closed — don't post what we couldn't vet
+        return (False, 0, src)  # fail closed — don't post what we couldn't vet
 
     async def _relay_clip(self, settings_rows, clip, live):
-        """Post one uploaded Fox clip as a video with a Spanish caption to every enabled
-        guild's goal channel, and push it to the web feed. Independent of the web goal stream.
-        Posts ONLY when the clip is about a goal AND about a team playing right now (the X
-        stream is otherwise too noisy). Out of window / off-topic / non-goal → dropped."""
+        """Post one uploaded Fox clip as a video with a Spanish caption. Routing:
+        EVERY clip about a live match → that match's game thread (under lt_channel_id, with the
+        live embeds); GOAL clips → ALSO the goal channel (lt_goal_channel_id). Clips not about
+        any live match (other games, nostalgia, memes) are dropped. The X stream owns the video;
+        the web stream still owns the textual goal announcements."""
         clip_id = clip.get("clip_id")
         if not live:
             # No game in window — drop it so an off-hours clip never posts.
@@ -569,14 +577,15 @@ class LiveTracker(commands.Cog):
             await self._mark_clip(clip_id, "expired")
             return
         # Prefer the Redis payload text; fall back to the goal_clips row (always populated at
-        # ingest). Vet that it's a GOAL about a live team, and translate, in one LLM call.
+        # ingest). One LLM call: which live match it's about, whether it's a goal, + translate.
         src = clip.get("text") or row_text
-        is_goal, relevant, es = await self._caption_for_clip(src, live)
-        if not (is_goal and relevant):
-            log.info("live_tracker: clip %s skipped (is_goal=%s relevant=%s) — %r",
-                     clip_id, is_goal, relevant, (src or "")[:80])
+        is_goal, idx, es = await self._caption_for_clip(src, live)
+        if idx < 1 or idx > len(live):
+            log.info("live_tracker: clip %s skipped — not about a live match (match=%s) — %r",
+                     clip_id, idx, (src or "")[:80])
             await self._mark_clip(clip_id, "skipped")
             return
+        m = live[idx - 1]  # the live match this clip is about → its game thread
         # Dedup near-identical reposts: Fox posts the same goal as several tweets (different
         # tweet_ids, same/near text), so tweet-id dedup misses them. First clip of a given
         # text signature wins for a few hours; later identical posts are dropped.
@@ -590,24 +599,41 @@ class LiveTracker(commands.Cog):
             except Exception:
                 pass
         cap = f"🎥 {es}" if es else "🎥 ⚽"
-        log.info("live_tracker: relaying clip %s — %r", clip_id, cap[:90])
+        log.info("live_tracker: relaying clip %s (is_goal=%s match=%s) — %r",
+                 clip_id, is_goal, m["id"], cap[:90])
         await self._mark_clip(clip_id, "posted")
         for guild_id, settings_json in settings_rows:
             settings = settings_json if isinstance(settings_json, dict) else _safe_json(settings_json)
-            if not settings.get("lt_enabled") or not settings.get("lt_goal_channel_id"):
+            if not settings.get("lt_enabled"):
                 continue
             guild = self.bot.get_guild(int(guild_id))
-            channel = guild.get_channel(int(settings["lt_goal_channel_id"])) if guild else None
-            if channel is None:
+            if guild is None:
                 continue
-            try:
-                await channel.send(content=cap[:1900],
+            # (a) game thread under lt_channel_id — EVERY match clip (alongside the live embeds)
+            ch_id = settings.get("lt_channel_id")
+            live_ch = guild.get_channel(int(ch_id)) if ch_id else None
+            if live_ch is not None:
+                thread = await self._match_thread(live_ch, guild_id, m, None)
+                target = thread or live_ch
+                try:
+                    await target.send(content=cap[:1900],
+                                      file=discord.File(file_path, filename=f"gol_{clip_id}.mp4"))
+                except discord.HTTPException as e:
+                    log.warning("live_tracker: clip thread post failed (guild %s): %r", guild_id, e)
+            # (b) goal channel — GOAL clips only
+            gch_id = settings.get("lt_goal_channel_id")
+            gch = guild.get_channel(int(gch_id)) if (is_goal and gch_id) else None
+            if gch is not None:
+                try:
+                    await gch.send(content=cap[:1900],
                                    file=discord.File(file_path, filename=f"gol_{clip_id}.mp4"))
-            except discord.HTTPException as e:
-                log.warning("live_tracker: clip post failed (guild %s): %r", guild_id, e)
-        await self._push_event({"type": "goal_clip",
-                                "video_url": f"/api/v1/goal-clips/{clip_id}/video",
-                                "text": cap, "ts": int(time.time())})
+                except discord.HTTPException as e:
+                    log.warning("live_tracker: clip goal-channel post failed (guild %s): %r", guild_id, e)
+        # Web "Now" feed = highlights → push the clip only for goals.
+        if is_goal:
+            await self._push_event({"type": "goal_clip", "match_id": m["id"],
+                                    "video_url": f"/api/v1/goal-clips/{clip_id}/video",
+                                    "text": cap, "ts": int(time.time())})
 
     async def _announce_new_goals(self, settings_rows, new_goals):
         """Announce each new goal once to every enabled guild's goal channel. The web stream
