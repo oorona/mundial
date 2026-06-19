@@ -23,6 +23,10 @@ const ARGS = {
     "--mute-audio",
     "--disable-background-networking",
     "--disable-features=Translate,BackForwardCache,MediaRouter",
+    "--disk-cache-size=10000000", // cap Chromium's on-disk cache (~10MB) — the page is a
+                                  // long-running tab; an uncapped media cache is heavy disk I/O
+    "--media-cache-size=1",
+    "--autoplay-policy=document-user-activation-required", // never autoplay timeline videos
   ],
   ignoreDefaultArgs: ["--enable-automation"],
 };
