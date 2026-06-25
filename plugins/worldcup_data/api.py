@@ -222,14 +222,52 @@ async def matches_today(db: AsyncSession = Depends(get_db)):
 
 
 # ── Bracket ─────────────────────────────────────────────────────────────────────
+def _bracket_order(matches: list[WCMatch]) -> dict[int, str]:
+    """Position each knockout match in tournament-tree order (top→bottom) by walking
+    the "Winner/Loser Match N" feeder graph from the final outward. A bracket UI that
+    splits each round into left/right halves must use this order, NOT match-id order:
+    the official feeders cross the middle (QF98←R16 93/94, QF99←R16 91/92), so id
+    order would scatter a single quarter-final's two sides into opposite halves."""
+    by_id = {m.id: m for m in matches}
+
+    def child_id(label: str | None):
+        if not label:
+            return None
+        low = label.strip().lower()
+        if low.startswith("winner match ") or low.startswith("loser match "):
+            digits = "".join(ch for ch in label if ch.isdigit())
+            return int(digits) if digits else None
+        return None
+
+    keys: dict[int, str] = {}
+
+    def assign(mid, key: str):
+        if mid is None or mid in keys or mid not in by_id:
+            return
+        keys[mid] = key
+        m = by_id[mid]
+        assign(child_id(m.home_team_label), key + "0")
+        assign(child_id(m.away_team_label), key + "1")
+
+    for rid in [m.id for m in matches if m.round_code == "final"]:
+        assign(rid, "")
+    # Anything not reachable from the final (third-place match, partial seeds) keeps a
+    # stable trailing key so it still renders deterministically.
+    for m in sorted(matches, key=lambda x: x.id):
+        keys.setdefault(m.id, f"~{m.id:06d}")
+    return keys
+
+
 @router.get("/bracket")
 async def bracket(db: AsyncSession = Depends(get_db)):
     base = _base_url()
     tmap = await _team_map(db)
     smap = {s.id: s for s in (await db.execute(select(WCStadium))).scalars().all()}
     matches = (await db.execute(
-        select(WCMatch).where(WCMatch.round_code != "group").order_by(WCMatch.id)
+        select(WCMatch).where(WCMatch.round_code != "group")
     )).scalars().all()
+    order = _bracket_order(matches)
+    matches = sorted(matches, key=lambda m: order[m.id])
     rounds = {r: [] for r in KO_ROUNDS}
     for m in matches:
         rounds.setdefault(m.round_code, []).append(_match_brief(m, tmap, smap, base))

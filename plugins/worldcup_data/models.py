@@ -293,18 +293,23 @@ async def resolve_bracket(session: AsyncSession) -> int:
             return win if low.startswith("winner") else lose
         return None
 
+    def _mutable(m: "WCMatch") -> bool:
+        # A slot's participants may still change while the knockout match has not
+        # started and carries no result. Once it is live or final, freeze it — so a
+        # late correction to a group result reflows here, but played games never move.
+        return (not m.finished) and m.home_score is None and m.away_score is None
+
     filled = 0
     for m in ko:
-        if m.home_team_id is None:
-            tid = resolve_label(m.home_team_label) or resolve_match_label(m.home_team_label)
-            if tid:
-                m.home_team_id = tid
-                filled += 1
-        if m.away_team_id is None:
-            tid = resolve_label(m.away_team_label) or resolve_match_label(m.away_team_label)
-            if tid:
-                m.away_team_id = tid
-                filled += 1
+        mutable = _mutable(m)
+        new_home = resolve_label(m.home_team_label) or resolve_match_label(m.home_team_label)
+        if new_home and new_home != m.home_team_id and (m.home_team_id is None or mutable):
+            m.home_team_id = new_home
+            filled += 1
+        new_away = resolve_label(m.away_team_label) or resolve_match_label(m.away_team_label)
+        if new_away and new_away != m.away_team_id and (m.away_team_id is None or mutable):
+            m.away_team_id = new_away
+            filled += 1
 
     if filled:
         await session.flush()

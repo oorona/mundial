@@ -1170,14 +1170,16 @@ class LiveTracker(commands.Cog):
             return None
 
         for m in ko:
-            if m["home_team_id"] is None:
-                tid = resolve(m["home_team_label"])
-                if tid:
-                    await s.execute(text("UPDATE matches SET home_team_id=:t WHERE id=:i AND home_team_id IS NULL"), {"t": tid, "i": m["id"]})
-            if m["away_team_id"] is None:
-                tid = resolve(m["away_team_label"])
-                if tid:
-                    await s.execute(text("UPDATE matches SET away_team_id=:t WHERE id=:i AND away_team_id IS NULL"), {"t": tid, "i": m["id"]})
+            # Participants may still change while the match has not started and has no
+            # result; once it is live or final, freeze it — so a late correction to a
+            # group result reflows here, but played games never move.
+            mutable = (not m["finished"]) and m["home_score"] is None and m["away_score"] is None
+            new_home = resolve(m["home_team_label"])
+            if new_home and new_home != m["home_team_id"] and (m["home_team_id"] is None or mutable):
+                await s.execute(text("UPDATE matches SET home_team_id=:t WHERE id=:i"), {"t": new_home, "i": m["id"]})
+            new_away = resolve(m["away_team_label"])
+            if new_away and new_away != m["away_team_id"] and (m["away_team_id"] is None or mutable):
+                await s.execute(text("UPDATE matches SET away_team_id=:t WHERE id=:i"), {"t": new_away, "i": m["id"]})
 
     # ── Rescore predictions (all guilds) ─────────────────────────────────────────
     async def _rescore(self, s):
