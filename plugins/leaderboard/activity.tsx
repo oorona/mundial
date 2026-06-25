@@ -18,12 +18,90 @@ interface TodayPlayer {
 }
 interface TodayBoard { date: string; matches: TodayMatch[]; players: TodayPlayer[]; }
 
+interface BreakdownGame {
+  match_id: number; round_code: string; home: string | null; away: string | null;
+  home_code: string; away_code: string; home_score: number; away_score: number;
+  kickoff_unix: number | null; pred_home: number; pred_away: number; points: number;
+}
+interface Breakdown {
+  user_id: string; username: string; total_points: number; games_scored: number;
+  exactos: number; games: BreakdownGame[];
+}
+
+// Click a player on any standings list → audit every scored pick of theirs against
+// the real result, with the per-game points summing to the leaderboard total. Stays
+// in-page (Activity SDK can't navigate between /activity/* routes).
+function ReconciliationModal({ guildId, userId, fallbackName, onClose }:
+  { guildId: string; userId: string; fallbackName: string; onClose: () => void }) {
+  const { t } = useTranslation();
+  const [data, setData] = useState<Breakdown | null>(null);
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    apiClient.get<Breakdown>(`/guilds/${guildId}/leaderboard/user/${userId}`)
+      .then(setData).catch(() => setError(true));
+  }, [guildId, userId]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-2 sm:items-center" onClick={onClose}>
+      <div className="flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-background shadow-xl"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate font-bold">{data?.username || fallbackName}</h2>
+            <p className="text-xs text-muted-foreground">{t('leaderboard.reconTitle')}</p>
+          </div>
+          <button onClick={onClose} aria-label="close"
+            className="ml-2 shrink-0 rounded px-2 py-1 text-muted-foreground hover:text-foreground">✕</button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {error ? <p className="p-4 text-sm text-muted-foreground">{t('fixturesActivity.error')}</p>
+          : data === null ? <p className="p-4 text-sm text-muted-foreground">{t('common.loading')}</p>
+          : data.games.length === 0 ? <p className="p-4 text-sm text-muted-foreground">{t('leaderboard.reconEmpty')}</p>
+          : (
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-muted text-[11px] text-muted-foreground">
+                <tr>
+                  <th className="px-2 py-1.5 text-left">{t('leaderboard.reconMatch')}</th>
+                  <th className="px-2 py-1.5 text-center">{t('leaderboard.reconResult')}</th>
+                  <th className="px-2 py-1.5 text-center">{t('leaderboard.reconPick')}</th>
+                  <th className="px-2 py-1.5 text-right">{t('leaderboard.points')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.games.map((g) => {
+                  const exact = g.pred_home === g.home_score && g.pred_away === g.away_score;
+                  return (
+                    <tr key={g.match_id} className="border-t border-border/60">
+                      <td className="px-2 py-1.5"><span className="opacity-50">#{g.match_id}</span> {g.home_code}–{g.away_code}</td>
+                      <td className="px-2 py-1.5 text-center font-semibold">{g.home_score}–{g.away_score}</td>
+                      <td className={`px-2 py-1.5 text-center ${exact ? 'font-semibold text-emerald-500' : ''}`}>{g.pred_home}–{g.pred_away}</td>
+                      <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{g.points}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot className="sticky bottom-0 border-t-2 border-border bg-card">
+                <tr>
+                  <td className="px-2 py-2 font-semibold" colSpan={3}>
+                    {t('leaderboard.reconTotal')} · {data.games_scored} {t('leaderboard.reconGames')} · {data.exactos} {t('leaderboard.exact')}
+                  </td>
+                  <td className="px-2 py-2 text-right text-sm font-bold tabular-nums">{data.total_points}</td>
+                </tr>
+              </tfoot>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LeaderboardActivity() {
   const { t } = useTranslation();
   const [guildId, setGuildId] = useState<string | null>(null);
   const [tab, setTab] = useState<'global' | 'today' | 'daily'>('global');
   const [rows, setRows] = useState<Row[] | null>(null);
   const [today, setToday] = useState<TodayBoard | null>(null);
+  const [reconUser, setReconUser] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     // Reuse the guild the hub captured (no re-handshake); else handshake; else
@@ -124,13 +202,22 @@ function LeaderboardActivity() {
             <ol className="space-y-1">
               {rows.map((r) => (
                 <li key={r.user_id} className="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2 text-sm">
-                  <span className="flex items-center gap-3"><span className="w-6 text-muted-foreground">{r.position}</span><span className="font-medium">{r.username}</span></span>
-                  <span className="flex items-center gap-3"><span className="font-semibold">{r.points} pts</span><span className="text-xs text-muted-foreground">{r.exactos} {t('leaderboard.exact')}</span></span>
+                  <button onClick={() => setReconUser({ id: r.user_id, name: r.username })}
+                    className="flex min-w-0 items-center gap-3 text-left hover:text-primary">
+                    <span className="w-6 shrink-0 text-muted-foreground">{r.position}</span>
+                    <span className="truncate font-medium underline-offset-2 hover:underline">{r.username}</span>
+                  </button>
+                  <span className="flex shrink-0 items-center gap-3"><span className="font-semibold">{r.points} pts</span><span className="text-xs text-muted-foreground">{r.exactos} {t('leaderboard.exact')}</span></span>
                 </li>
               ))}
             </ol>
           )}
+          {rows && rows.length > 0 && <p className="mt-2 text-xs text-muted-foreground">{t('leaderboard.reconHint')}</p>}
         </>
+      )}
+      {reconUser && guildId && (
+        <ReconciliationModal guildId={guildId} userId={reconUser.id} fallbackName={reconUser.name}
+          onClose={() => setReconUser(null)} />
       )}
     </div>
   );

@@ -260,6 +260,56 @@ async def get_today_picks(
     return {"date": day.isoformat(), "matches": [dict(m) for m in matches], "players": rows}
 
 
+# Per-game reconciliation for one player (finished games only): every pick, the real
+# result, and the points it earned, ordered by kickoff. Finished-only keeps a player's
+# pending picks for upcoming matches private while still summing to their full total.
+_USER_BREAKDOWN_SQL = text("""
+    SELECT m.id AS match_id, m.type AS round_code,
+           COALESCE(ht.name_en, m.home_team_label) AS home,
+           COALESCE(at.name_en, m.away_team_label) AS away,
+           UPPER(COALESCE(ht.fifa_code, left(COALESCE(ht.name_en, m.home_team_label, '?'), 3))) AS home_code,
+           UPPER(COALESCE(at.fifa_code, left(COALESCE(at.name_en, m.away_team_label, '?'), 3))) AS away_code,
+           m.home_score AS home_score, m.away_score AS away_score,
+           extract(epoch FROM m.kickoff_at)::bigint AS kickoff_unix,
+           p.pred_home AS pred_home, p.pred_away AS pred_away, p.points AS points
+    FROM predictions p
+    JOIN matches m ON m.id = p.match_id
+    LEFT JOIN teams ht ON ht.id = m.home_team_id
+    LEFT JOIN teams at ON at.id = m.away_team_id
+    WHERE p.user_id = :uid AND m.finished = true
+      AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+    ORDER BY m.kickoff_at, m.id
+""")
+
+
+@router.get("/{guild_id}/leaderboard/user/{user_id}")
+async def get_user_breakdown(
+    guild_id: int,
+    user_id: int,
+    db: AsyncSession = Depends(get_guild_db),
+    redis=Depends(get_redis),
+    _viewer: None = Depends(_require_guild_viewer),
+):
+    """Per-game reconciliation for one player: every scored pick, the real result, and
+    the points it earned, plus the grand total. The total equals the player's
+    leaderboard points (both sum stored `points` by user_id, so a player's per-server
+    display name — e.g. the AI's — never splits it), making this an audit of the
+    standings. RLS scopes rows to this guild; only finished games are returned."""
+    games = (await db.execute(_USER_BREAKDOWN_SQL, {"uid": user_id})).mappings().all()
+    total = sum((g["points"] or 0) for g in games)
+    exactos = sum(1 for g in games if g["pred_home"] == g["home_score"] and g["pred_away"] == g["away_score"])
+    rows = await _apply_display_names(redis, guild_id, [{"user_id": str(user_id), "username": None}])
+    username = (rows[0].get("username") if rows else None) or f"Jugador {str(user_id)[-4:]}"
+    return {
+        "user_id": str(user_id),
+        "username": username,
+        "total_points": total,
+        "games_scored": len(games),
+        "exactos": exactos,
+        "games": [dict(g) for g in games],
+    }
+
+
 @router.get("/{guild_id}/leaderboard/stream")
 async def leaderboard_stream(
     guild_id: int,
