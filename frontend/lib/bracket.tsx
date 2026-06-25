@@ -24,9 +24,29 @@ function Flag({ team }: { team: TeamBrief | null }) {
   return <img src={team.flag_url} alt="" className="inline-block h-3 w-4 rounded-sm object-cover" />;
 }
 
+// Compact placeholder labels so a narrow box fits both a 3-letter country code and
+// the unresolved slot: "Winner Group A"→"1A", "Runner-up Group A"→"2A",
+// "Winner Match 89"→"W89", "Loser Match 101"→"L101", "3rd Group A/B/C/D/F"→"3°ABCDF".
+function shortLabel(label: string): string {
+  const m = label.trim();
+  let g: RegExpMatchArray | null;
+  if ((g = m.match(/^winner group ([a-l])$/i))) return `1${g[1].toUpperCase()}`;
+  if ((g = m.match(/^runner-?up group ([a-l])$/i))) return `2${g[1].toUpperCase()}`;
+  if ((g = m.match(/^winner match (\d+)$/i))) return `W${g[1]}`;
+  if ((g = m.match(/^loser match (\d+)$/i))) return `L${g[1]}`;
+  if ((g = m.match(/^3rd group (.+)$/i))) return `3°${g[1].replace(/[\s/]/g, '')}`;
+  return m;
+}
+
 function sideShort(s: MatchSide, tbd: string): string {
   if (s.resolved && s.team) return s.team.fifa_code || s.team.name || tbd;
-  return s.label || tbd;  // e.g. "Winner Group A", "Winner Match 89"
+  return s.label ? shortLabel(s.label) : tbd;
+}
+
+// Full text for the hover/long-press title, so abbreviations stay discoverable.
+function sideTitle(s: MatchSide): string {
+  if (s.resolved && s.team) return s.team.name || s.team.fifa_code || '';
+  return s.label || '';
 }
 
 function MiniMatch({ m, onClick, big = false }: { m: KMatch; onClick: () => void; big?: boolean }) {
@@ -34,7 +54,7 @@ function MiniMatch({ m, onClick, big = false }: { m: KMatch; onClick: () => void
   const tbd = t('fixturesActivity.tbd');
   const row = (s: MatchSide, score: number | null) => (
     <div className="flex items-center justify-between gap-1">
-      <span className="flex min-w-0 items-center gap-1"><Flag team={s.team} /><span className="truncate">{sideShort(s, tbd)}</span></span>
+      <span className="flex min-w-0 items-center gap-1" title={sideTitle(s)}><Flag team={s.team} /><span className="truncate">{sideShort(s, tbd)}</span></span>
       {m.finished && score !== null && <span className="font-semibold tabular-nums">{score}</span>}
     </div>
   );
@@ -50,7 +70,7 @@ function MiniMatch({ m, onClick, big = false }: { m: KMatch; onClick: () => void
 
 function Column({ label, matches, onMatch }: { label: string; matches: KMatch[]; onMatch: (id: number) => void }) {
   return (
-    <div className="flex w-28 shrink-0 flex-col">
+    <div className="flex w-20 shrink-0 flex-col">
       <div className="mb-1 text-center text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
       <div className="flex flex-1 flex-col justify-around gap-2">
         {matches.map((m) => <MiniMatch key={m.id} m={m} onClick={() => onMatch(m.id)} />)}
@@ -88,7 +108,7 @@ export function BracketBoard({ onMatch }: { onMatch: (id: number) => void }) {
         {sfL.length > 0 && <Column label={lbl('sf')} matches={sfL} onMatch={onMatch} />}
 
         {/* Centre: Final + third place */}
-        <div className="flex w-32 shrink-0 flex-col justify-center gap-4">
+        <div className="flex w-28 shrink-0 flex-col justify-center gap-4">
           <div>
             <div className="mb-1 text-center text-[10px] font-semibold uppercase tracking-wide text-primary">🏆 {lbl('final')}</div>
             {final ? <MiniMatch m={final} onClick={() => onMatch(final.id)} big /> : <div className="rounded-md border border-dashed border-border p-3 text-center text-[11px] text-muted-foreground">{t('fixturesActivity.tbd')}</div>}
