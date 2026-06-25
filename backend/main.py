@@ -135,12 +135,16 @@ async def lifespan(app: FastAPI):
     # Start heartbeat task
     task = asyncio.create_task(send_heartbeats())
     
-    # Log routes
+    # Log routes — purely diagnostic, must never crash startup. Some entries in
+    # app.routes (mounts, included sub-routers) expose no `.path`, so resolve it
+    # defensively rather than assuming the attribute exists.
     for route in app.routes:
-        if hasattr(route, "methods"):
-            logger.info(f"Route: {route.path} {route.methods}")
+        path = getattr(route, "path", None) or getattr(route, "path_format", None) or repr(route)
+        methods = getattr(route, "methods", None)
+        if methods:
+            logger.info(f"Route: {path} {methods}")
         else:
-            logger.info(f"Route: {route.path}")
+            logger.info(f"Route: {path}")
             
     yield
     
