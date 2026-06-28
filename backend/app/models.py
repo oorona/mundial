@@ -472,9 +472,10 @@ def score_prediction(
     Participating earns a 1-pt floor (the caller only invokes this for a pick the
     user actually submitted on a finished match); correctness is added on top —
     exact score → +w_exact; same (nonzero) goal difference → +w_diff; same tendency
-    (incl. draw) → +w_tend; wrong → +0. Knockout multiplies the correctness part.
-    So wrong=1, tendency=1+w_tend, diff=1+w_diff, exact=1+w_exact (KO: ×ko_mult on
-    the correctness). Non-participants have no row → 0 (handled by the caller).
+    (incl. draw) → +w_tend; wrong → +0. So wrong=1, tendency=1+w_tend, diff=1+w_diff,
+    exact=1+w_exact. Knockout rounds score the same as group rounds (no multiplier).
+    Non-participants have no row → 0 (handled by the caller). `ko_mult`/`is_knockout`
+    are retained for signature stability but no longer affect the score.
     """
     if pred_h is None or pred_a is None or act_h is None or act_a is None:
         return 0
@@ -487,8 +488,7 @@ def score_prediction(
         base = w_tend
     else:
         base = 0
-    correctness = int(round(base * float(ko_mult))) if (base and is_knockout) else base
-    return 1 + correctness
+    return 1 + int(base)
 
 
 def _sign(n: int) -> int:

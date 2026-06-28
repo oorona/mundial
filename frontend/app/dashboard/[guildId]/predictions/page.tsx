@@ -23,10 +23,6 @@ interface OpenResponse {
   open_match_ids: number[];
   picks: Record<string, { home: number; away: number; points: number }>;
 }
-interface Rules {
-  weight_exact: number; weight_diff: number; weight_tendency: number;
-  knockout_multiplier: number; lock_lead_minutes: number;
-}
 interface Pool {
   name: string; weight_exact: number; weight_diff: number; weight_tendency: number;
   knockout_multiplier: number; lock_lead_minutes: number; enabled: boolean;
@@ -57,31 +53,6 @@ function Bar({ done, total }: { done: number; total: number }) {
   return (
     <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
       <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
-    </div>
-  );
-}
-
-// Read-only "how points work" label — NOT an editable form.
-function RulesLabel({ rules }: { rules: Rules | null }) {
-  const { t } = useTranslation();
-  const r = rules ?? { weight_exact: 4, weight_diff: 3, weight_tendency: 2, knockout_multiplier: 2, lock_lead_minutes: 0 };
-  const Row = ({ label, value }: { label: string; value: string }) => (
-    <div className="flex items-center justify-between border-b border-border py-2 last:border-0">
-      <span className="text-muted-foreground">{label}</span><span className="font-semibold text-foreground">{value}</span>
-    </div>
-  );
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <h2 className="font-semibold text-foreground">{t('predictions.rulesTitle')}</h2>
-      <p className="mb-2 text-xs text-muted-foreground">{t('predictions.rulesIntro')}</p>
-      <div className="text-sm">
-        <Row label={t('predictions.ruleParticipation')} value="1 pt" />
-        <Row label={t('predictions.ruleExact')} value={`+${r.weight_exact}`} />
-        <Row label={t('predictions.ruleDiff')} value={`+${r.weight_diff}`} />
-        <Row label={t('predictions.ruleTendency')} value={`+${r.weight_tendency}`} />
-        <Row label={t('predictions.ruleKnockout')} value={`×${r.knockout_multiplier}`} />
-      </div>
-      <p className="mt-2 text-xs text-muted-foreground">{t('predictions.lockNote')}</p>
     </div>
   );
 }
@@ -162,7 +133,6 @@ function PredictionsPage() {
 
   const [matches, setMatches] = useState<MatchBrief[]>([]);
   const [open, setOpen] = useState<OpenResponse | null>(null);
-  const [rules, setRules] = useState<Rules | null>(null);
   const [drafts, setDrafts] = useState<Record<number, { home: string; away: string }>>({});
   const [selected, setSelected] = useState<string | null>(null);
   const [mode, setMode] = useState<'phase' | 'day'>('phase');
@@ -171,7 +141,6 @@ function PredictionsPage() {
 
   useEffect(() => {
     apiClient.get<{ matches: MatchBrief[] }>('/worldcup/today').then((d) => setMatches(d.matches)).catch(() => {});
-    apiClient.get<Rules>(`/guilds/${guildId}/predictions/rules`).then(setRules).catch(() => {});
     apiClient.get<OpenResponse>(`/guilds/${guildId}/predictions/web-open`)
       .then((o) => {
         setOpen(o);
@@ -370,8 +339,6 @@ function PredictionsPage() {
         </div>
         <Bar done={totalDone} total={totalTotal} />
       </div>
-
-      <RulesLabel rules={rules} />
 
       <div className="flex gap-2">
         {(['phase', 'day'] as const).map((k) => (

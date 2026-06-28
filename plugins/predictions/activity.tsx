@@ -19,10 +19,6 @@ interface OpenResponse {
   open_match_ids: number[];
   picks: Record<string, { home: number; away: number; points: number }>;
 }
-interface Rules {
-  weight_exact: number; weight_diff: number; weight_tendency: number;
-  knockout_multiplier: number; lock_lead_minutes: number;
-}
 interface Section {
   key: string; title: string; matches: MatchBrief[];
   predictableIds: Set<number>; total: number; done: number;
@@ -46,30 +42,6 @@ function Bar({ done, total }: { done: number; total: number }) {
   );
 }
 
-function RulesLabel({ rules }: { rules: Rules | null }) {
-  const { t } = useTranslation();
-  const r = rules ?? { weight_exact: 4, weight_diff: 3, weight_tendency: 2, knockout_multiplier: 2, lock_lead_minutes: 0 };
-  const Row = ({ label, value }: { label: string; value: string }) => (
-    <div className="flex items-center justify-between border-b border-border py-2 last:border-0">
-      <span className="text-muted-foreground">{label}</span><span className="font-semibold text-foreground">{value}</span>
-    </div>
-  );
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <h2 className="font-semibold text-foreground">{t('predictions.rulesTitle')}</h2>
-      <p className="mb-2 text-xs text-muted-foreground">{t('predictions.rulesIntro')}</p>
-      <div className="text-sm">
-        <Row label={t('predictions.ruleParticipation')} value="1 pt" />
-        <Row label={t('predictions.ruleExact')} value={`+${r.weight_exact}`} />
-        <Row label={t('predictions.ruleDiff')} value={`+${r.weight_diff}`} />
-        <Row label={t('predictions.ruleTendency')} value={`+${r.weight_tendency}`} />
-        <Row label={t('predictions.ruleKnockout')} value={`×${r.knockout_multiplier}`} />
-      </div>
-      <p className="mt-2 text-xs text-muted-foreground">{t('predictions.lockNote')}</p>
-    </div>
-  );
-}
-
 function PredictActivity() {
   const { t, language } = useTranslation();
   const locale = language === 'es' ? 'es-ES' : 'en-US';
@@ -78,7 +50,6 @@ function PredictActivity() {
   const [noSession, setNoSession] = useState(false);
   const [matches, setMatches] = useState<MatchBrief[]>([]);
   const [open, setOpen] = useState<OpenResponse | null>(null);
-  const [rules, setRules] = useState<Rules | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [drafts, setDrafts] = useState<Record<number, { home: string; away: string }>>({});
   const [selected, setSelected] = useState<string | null>(null);
@@ -114,7 +85,6 @@ function PredictActivity() {
   useEffect(() => {
     if (!guildId) return;
     apiClient.get<{ matches: MatchBrief[] }>('/worldcup/today').then((d) => setMatches(d.matches)).catch(() => {});
-    apiClient.get<Rules>(`/guilds/${guildId}/predictions/rules`).then(setRules).catch(() => {});
     loadOpen(guildId);
   }, [guildId]);
 
@@ -302,8 +272,6 @@ function PredictActivity() {
         </div>
         <Bar done={totalDone} total={totalTotal} />
       </div>
-
-      <RulesLabel rules={rules} />
 
       <div className="space-y-2">
         <h2 className="font-semibold text-foreground">{t('predictions.groupStage')}</h2>

@@ -60,6 +60,7 @@ PREDICT_SCHEMA_DOC = {
 
 _MATCH_SQL = text("""
     SELECT m.id AS id, ht.name_en AS home, at.name_en AS away, m.finished AS finished,
+           m.type AS round_code,
            to_char(m.kickoff_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day
     FROM matches m
     JOIN teams ht ON ht.id = m.home_team_id
@@ -209,12 +210,26 @@ class AIPlayer(commands.Cog):
         """Grounded web analysis → (analysis_text, home, away, confidence)."""
         try:
             from services.llm import LLMMessage
-            sys = self.llm.load_prompt("ai_player", "predict_fetch", "system_prompt") or (
+            # Knockout (second-phase) matches cannot end level — a draw means extra time /
+            # penalties decide a winner — so the analyst must commit to a decisive score.
+            knockout = (m.get("round_code") or "group") != "group"
+            ko_fetch = (
+                " IMPORTANTE: es un partido de eliminación directa (fase final): NO puede "
+                "terminar en empate. Si el análisis apunta a un marcador igualado en el tiempo "
+                "reglamentario, decide al ganador por prórroga o penales y concluye con un "
+                "marcador final DECISIVO, nunca un empate."
+            ) if knockout else ""
+            ko_parse = (
+                " Es eliminatoria: el marcador NO puede ser empate. Ajusta para reflejar al "
+                "ganador que avanza (por prórroga/penales) y rellena 'winner' con 'home' o 'away'."
+            ) if knockout else ""
+
+            sys = (self.llm.load_prompt("ai_player", "predict_fetch", "system_prompt") or (
                 "Eres un analista de fútbol. Usa la búsqueda web para revisar pronósticos, "
                 "cuotas de apuestas y análisis de expertos sobre un partido del Mundial 2026. "
                 "Explica brevemente el contexto (forma, bajas, favoritismo) y concluye con el "
                 "marcador EXACTO más probable según el consenso. Responde en español (es-MX)."
-            )
+            )) + ko_fetch
             tmpl = self.llm.load_prompt("ai_player", "predict_fetch", "user_prompt") or (
                 "Partido del Mundial 2026: {home} vs {away} (fecha {day}). "
                 "Analiza y di el marcador final más probable según pronósticos y cuotas en internet."
@@ -227,12 +242,19 @@ class AIPlayer(commands.Cog):
             )
             analysis = grounded if isinstance(grounded, str) else json.dumps(grounded)
 
-            parse_sys = self.llm.load_prompt("ai_player", "predict_parse", "system_prompt") or (
+            parse_sys = (self.llm.load_prompt("ai_player", "predict_parse", "system_prompt") or (
                 "Extrae un objeto JSON estricto con el marcador pronosticado (home_goals, away_goals, "
                 "confidence 0-1) del texto. Usa enteros para los goles."
-            )
+            )) + ko_parse
             parse_tmpl = self.llm.load_prompt("ai_player", "predict_parse", "user_prompt") or "{text}"
             schema = await self._predict_schema()
+            if knockout:
+                # Ask for the advancing side too, so a stray tie can be broken decisively.
+                schema = dict(schema)
+                props = dict(schema.get("properties", {}))
+                props["winner"] = {"type": "string", "enum": ["home", "away"],
+                                   "description": "Equipo que avanza si el marcador queda igualado (prórroga/penales)."}
+                schema["properties"] = props
             data = await self.llm.generate_structured(
                 parse_tmpl.format(text=analysis), schema, system_prompt=parse_sys
             )
@@ -240,6 +262,13 @@ class AIPlayer(commands.Cog):
                 h, a = int(data["home_goals"]), int(data["away_goals"])
                 conf = data.get("confidence")
                 conf = float(conf) if isinstance(conf, (int, float)) else None
+                if knockout and h == a:
+                    # A knockout tie is invalid: give the extra goal to the side the
+                    # analyst says advances (default home if it didn't specify).
+                    if data.get("winner") == "away":
+                        a = h + 1
+                    else:
+                        h = a + 1
                 if 0 <= h <= 20 and 0 <= a <= 20:
                     return analysis, h, a, conf
         except Exception as e:

@@ -60,7 +60,7 @@ interface MatchBrief {
   home_pens?: number | null; away_pens?: number | null;
   finished: boolean; time_elapsed?: string | null; kickoff_unix: number | null; stadium?: Stadium | null;
 }
-interface FeedEvent { type: string; text?: string; home?: string; away?: string; ts?: number; video_url?: string; }
+interface FeedEvent { type: string; text?: string; home?: string; away?: string; ts?: number; }
 interface Group { group: string; standings: StandingRow[]; }
 interface TeamDetail {
   team: TeamBrief & { coach?: string; nickname?: string; confederation?: string; wc_appearances?: number; wc_first_year?: number; wc_best_result?: string; fifa_ranking?: number; wikipedia_url?: string };
@@ -68,7 +68,6 @@ interface TeamDetail {
   matches: MatchBrief[];
 }
 interface OpenResponse { enabled: boolean; open_match_ids: number[]; picks: Record<string, { home: number; away: number; points: number }>; }
-interface Rules { weight_exact: number; weight_diff: number; weight_tendency: number; knockout_multiplier: number; lock_lead_minutes: number; }
 interface Section { key: string; title: string; matches: MatchBrief[]; predictableIds: Set<number>; total: number; done: number; }
 interface Row { position: number; user_id: string; username: string; points: number; exactos: number; aciertos: number; }
 interface TodayMatch {
@@ -326,27 +325,12 @@ function VenuesView({ onMatch }: { onMatch: (id: number) => void }) {
   );
 }
 
-function RulesLabel({ rules }: { rules: Rules | null }) {
-  const { t } = useTranslation();
-  const r = rules ?? { weight_exact: 4, weight_diff: 3, weight_tendency: 2, knockout_multiplier: 2, lock_lead_minutes: 0 };
-  const R = ({ label, value }: { label: string; value: string }) => (<div className="flex items-center justify-between border-b border-border py-2 last:border-0"><span className="text-muted-foreground">{label}</span><span className="font-semibold text-foreground">{value}</span></div>);
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <h2 className="font-semibold text-foreground">{t('predictions.rulesTitle')}</h2>
-      <p className="mb-2 text-xs text-muted-foreground">{t('predictions.rulesIntro')}</p>
-      <div className="text-sm"><R label={t('predictions.ruleParticipation')} value="1 pt" /><R label={t('predictions.ruleExact')} value={`+${r.weight_exact}`} /><R label={t('predictions.ruleDiff')} value={`+${r.weight_diff}`} /><R label={t('predictions.ruleTendency')} value={`+${r.weight_tendency}`} /><R label={t('predictions.ruleKnockout')} value={`×${r.knockout_multiplier}`} /></div>
-      <p className="mt-2 text-xs text-muted-foreground">{t('predictions.lockNote')}</p>
-    </div>
-  );
-}
-
 // ── Predictions view ───────────────────────────────────────────────────────────
 function PredictView({ guildId }: { guildId: string | null }) {
   const { t, language } = useTranslation();
   const locale = language === 'es' ? 'es-ES' : 'en-US';
   const [matches, setMatches] = useState<MatchBrief[]>([]);
   const [open, setOpen] = useState<OpenResponse | null>(null);
-  const [rules, setRules] = useState<Rules | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [drafts, setDrafts] = useState<Record<number, { home: string; away: string }>>({});
   const [selected, setSelected] = useState<string | null>(null);
@@ -363,7 +347,7 @@ function PredictView({ guildId }: { guildId: string | null }) {
   };
   useEffect(() => {
     apiClient.get<{ matches: MatchBrief[] }>('/worldcup/today').then((d) => setMatches(d.matches)).catch(() => {});
-    if (guildId) { apiClient.get<Rules>(`/guilds/${guildId}/predictions/rules`).then(setRules).catch(() => {}); loadOpen(); }
+    if (guildId) { loadOpen(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [guildId]);
 
@@ -463,7 +447,6 @@ function PredictView({ guildId }: { guildId: string | null }) {
   return (
     <div className="space-y-6">
       <div className="rounded-lg border border-border bg-card p-4"><div className="mb-2 flex items-center justify-between text-sm"><span className="font-medium text-foreground">{t('predictions.overviewTitle')}</span><span className="text-muted-foreground">{t('predictions.progress', { done: String(totalDone), total: String(totalTotal) })}</span></div><Bar done={totalDone} total={totalTotal} /></div>
-      <RulesLabel rules={rules} />
       <div className="flex gap-2">
         {(['phase', 'day'] as const).map((k) => (
           <button key={k} onClick={() => setMode(k)}
@@ -650,18 +633,7 @@ function NowView({ onLiveChange }: { onLiveChange?: (live: boolean) => void }) {
       <div className="space-y-2">
         {events.map((ev, i) => (
           <div key={`${ev.ts}-${i}`} className="rounded-md border border-border bg-card px-3 py-2 text-sm leading-snug">
-            <span className="mr-2" aria-hidden="true">{ev.type === 'goal_clip' ? '🎥' : ev.type === 'news' ? '📰' : ev.type === 'live' ? '⏱' : ''}</span>{ev.text}
-            {/* Fox goal clip: inline player. video_url is a relative path resolved against the app origin. */}
-            {ev.video_url && (
-              <video
-                src={ev.video_url}
-                controls
-                muted
-                playsInline
-                preload="metadata"
-                className="mt-2 w-full max-w-full rounded"
-              />
-            )}
+            <span className="mr-2" aria-hidden="true">{ev.type === 'news' ? '📰' : ev.type === 'live' ? '⏱' : ''}</span>{ev.text}
           </div>
         ))}
       </div>

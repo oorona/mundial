@@ -1594,8 +1594,9 @@ class LiveTracker(commands.Cog):
 def _score(ph, pa, ah, aa, we, wd, wt, km, is_ko) -> int:
     # A prediction row exists only if the user participated, and this runs only for
     # finished matches → every scored pick earns a 1-pt participation floor, with
-    # correctness added on top (knockout doubles the correctness part only).
-    # wrong=1, tendency=1+wt, diff=1+wd, exact=1+we; KO exact=1+(we*km).
+    # correctness added on top. Knockout rounds score the same as group rounds (no
+    # multiplier). wrong=1, tendency=1+wt, diff=1+wd, exact=1+we. `km`/`is_ko` are kept
+    # for signature stability but no longer affect the score.
     if ph is None or pa is None or ah is None or aa is None:
         return 0  # not scorable yet (match not finished)
     ph, pa, ah, aa = int(ph), int(pa), int(ah), int(aa)
@@ -1607,8 +1608,7 @@ def _score(ph, pa, ah, aa, we, wd, wt, km, is_ko) -> int:
         base = wt
     else:
         base = 0
-    correctness = int(round(base * float(km))) if (base and is_ko) else int(base)
-    return 1 + correctness
+    return 1 + int(base)
 
 
 _EVENT_EMOJI = {
