@@ -715,21 +715,55 @@ THIRD_PLACE_TABLE = {
 }
 
 
-def best_eight_third_slots(thirds: dict) -> dict:
-    """Map each R32 winner slot to its third-placed opponent per FIFA Annex C.
+THIRD_PLACE_ALL_GROUPS = set("ABCDEFGHIJKL")
 
-    `thirds` is {group_letter: (team_id, pts, gd, gf)} and must cover ALL 12 groups —
-    the 8/12 cut depends on the full set, so a partial dict yields {}. Returns
-    {winner_group_letter: third_place_team_id} for the 8 qualifying thirds, or {} when
-    the combination is unknown."""
-    if len(thirds) != 12:
+
+def _third_dominates(a, b):
+    # True only when third-place stats `a` definitely outrank `b` (strict on pts→gd→gf).
+    # All equal → a tie we cannot break here, so not a definite ordering.
+    if a[1] != b[1]:
+        return a[1] > b[1]
+    if a[2] != b[2]:
+        return a[2] > b[2]
+    if a[3] != b[3]:
+        return a[3] > b[3]
+    return False
+
+
+def determined_third_slots(finished_thirds: dict) -> dict:
+    """Resolve the R32 third-place slots that are ALREADY decided — even before every
+    group is final. `finished_thirds` is {group_letter: (team_id, pts, gd, gf)} for the
+    groups whose third-placed team is settled. Enumerate every Annex C combination still
+    achievable: a not-yet-final group is a wildcard that can finish anywhere (so it never
+    rules a combination out), and a combination is impossible only when a settled excluded
+    third strictly outranks a settled included one. A winner slot resolves when ALL
+    achievable combinations agree on its opponent and that opponent's group is settled.
+    Returns {winner_group_letter: third_place_team_id}."""
+    achievable = []
+    for key in THIRD_PLACE_TABLE:
+        groups = set(key)
+        ok = True
+        for g_in in groups:
+            if g_in not in finished_thirds:
+                continue
+            for g_out in THIRD_PLACE_ALL_GROUPS - groups:
+                if g_out in finished_thirds and _third_dominates(finished_thirds[g_out], finished_thirds[g_in]):
+                    ok = False
+                    break
+            if not ok:
+                break
+        if ok:
+            achievable.append(key)
+    if not achievable:
         return {}
-    order = sorted(thirds.items(), key=lambda kv: (-kv[1][1], -kv[1][2], -kv[1][3], kv[0]))
-    qualifiers = [letter for letter, _ in order[:8]]
-    assigned = THIRD_PLACE_TABLE.get("".join(sorted(qualifiers)))
-    if not assigned:
-        return {}
-    return {win: thirds[grp][0] for win, grp in zip(THIRD_PLACE_WINNER_ORDER, assigned)}
+    result = {}
+    for i, win in enumerate(THIRD_PLACE_WINNER_ORDER):
+        groups_for_slot = {THIRD_PLACE_TABLE[k][i] for k in achievable}
+        if len(groups_for_slot) == 1:
+            grp = next(iter(groups_for_slot))
+            if grp in finished_thirds:
+                result[win] = finished_thirds[grp][0]
+    return result
 
 
 async def resolve_bracket(session: AsyncSession) -> int:
@@ -794,10 +828,11 @@ async def resolve_bracket(session: AsyncSession) -> int:
             return win if low.startswith("winner") else lose
         return None
 
-    # Best-eight thirds → R32 winner slots (Annex C). Only fires once every group is
-    # final (the cut depends on all 12); a "3rd Group …" slot's occupant is dictated by
+    # Thirds → R32 winner slots (Annex C). Resolves each slot the moment it's decided
+    # across every still-possible qualifying combination, so a winner-vs-third match can
+    # fill in before the last group is final; a "3rd Group …" slot's occupant is keyed off
     # the OTHER side's "Winner Group X" label.
-    third_by_winner = best_eight_third_slots(group_third)
+    third_by_winner = determined_third_slots(group_third)
 
     def resolve_third_label(side_label: str | None, other_label: str | None):
         if not side_label or not side_label.strip().lower().startswith("3rd group"):
