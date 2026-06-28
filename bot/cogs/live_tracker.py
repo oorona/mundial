@@ -25,6 +25,156 @@ log = logging.getLogger("live_tracker")
 
 DEFAULT_ACCENT = "#ef4444"
 
+# ── FIFA Annex C: best-eight third-placed teams → R32 winner slots ───────────────
+# Key: the 8 qualifying third-place GROUP letters, sorted. Value: the third-place
+# group assigned to each winner slot, in winner-group order A,B,D,E,G,I,K,L. Source:
+# FIFA Regulations for the FIFA World Cup 26, Annex C (495 combinations). Validated
+# 2026-06-28: all C(12,8) combos present, none pairs a winner with its own group, and
+# every column's group-set equals the seeded "3rd Group …" eligibility labels.
+THIRD_PLACE_WINNER_ORDER = "ABDEGIKL"
+THIRD_PLACE_TABLE = {
+    "ABCDEFGH":"HGBCAFDE", "ABCDEFGI":"CGBDAFEI", "ABCDEFGJ":"CGBDAFEJ", "ABCDEFGK":"CGBDAFEK",
+    "ABCDEFGL":"CGBDAFLE", "ABCDEFHI":"HEBCAFDI", "ABCDEFHJ":"HJBCAFDE", "ABCDEFHK":"HEBCAFDK",
+    "ABCDEFHL":"HFBCADLE", "ABCDEFIJ":"CJBDAFEI", "ABCDEFIK":"CEBDAFIK", "ABCDEFIL":"CEBDAFLI",
+    "ABCDEFJK":"CJBDAFEK", "ABCDEFJL":"CJBDAFLE", "ABCDEFKL":"CEBDAFLK", "ABCDEGHI":"HGBCADEI",
+    "ABCDEGHJ":"HGBCADEJ", "ABCDEGHK":"HGBCADEK", "ABCDEGHL":"HGBCADLE", "ABCDEGIJ":"EGBCADIJ",
+    "ABCDEGIK":"EGBCADIK", "ABCDEGIL":"EGBCADLI", "ABCDEGJK":"EGBCADJK", "ABCDEGJL":"EGBCADLJ",
+    "ABCDEGKL":"EGBCADLK", "ABCDEHIJ":"HJBCADEI", "ABCDEHIK":"HEBCADIK", "ABCDEHIL":"HEBCADLI",
+    "ABCDEHJK":"HJBCADEK", "ABCDEHJL":"HJBCADLE", "ABCDEHKL":"HEBCADLK", "ABCDEIJK":"EJBCADIK",
+    "ABCDEIJL":"EJBCADLI", "ABCDEIKL":"EIBCADLK", "ABCDEJKL":"EJBCADLK", "ABCDFGHI":"HGBCAFDI",
+    "ABCDFGHJ":"HGBCAFDJ", "ABCDFGHK":"HGBCAFDK", "ABCDFGHL":"CGBDAFLH", "ABCDFGIJ":"CGBDAFIJ",
+    "ABCDFGIK":"CGBDAFIK", "ABCDFGIL":"CGBDAFLI", "ABCDFGJK":"CGBDAFJK", "ABCDFGJL":"CGBDAFLJ",
+    "ABCDFGKL":"CGBDAFLK", "ABCDFHIJ":"HJBCAFDI", "ABCDFHIK":"HFBCADIK", "ABCDFHIL":"HFBCADLI",
+    "ABCDFHJK":"HJBCAFDK", "ABCDFHJL":"CJBDAFLH", "ABCDFHKL":"HFBCADLK", "ABCDFIJK":"CJBDAFIK",
+    "ABCDFIJL":"CJBDAFLI", "ABCDFIKL":"CIBDAFLK", "ABCDFJKL":"CJBDAFLK", "ABCDGHIJ":"HGBCADIJ",
+    "ABCDGHIK":"HGBCADIK", "ABCDGHIL":"HGBCADLI", "ABCDGHJK":"HGBCADJK", "ABCDGHJL":"HGBCADLJ",
+    "ABCDGHKL":"HGBCADLK", "ABCDGIJK":"CJBDAGIK", "ABCDGIJL":"CJBDAGLI", "ABCDGIKL":"IGBCADLK",
+    "ABCDGJKL":"CJBDAGLK", "ABCDHIJK":"HJBCADIK", "ABCDHIJL":"HJBCADLI", "ABCDHIKL":"HIBCADLK",
+    "ABCDHJKL":"HJBCADLK", "ABCDIJKL":"IJBCADLK", "ABCEFGHI":"HGBCAFEI", "ABCEFGHJ":"HGBCAFEJ",
+    "ABCEFGHK":"HGBCAFEK", "ABCEFGHL":"HGBCAFLE", "ABCEFGIJ":"EGBCAFIJ", "ABCEFGIK":"EGBCAFIK",
+    "ABCEFGIL":"EGBCAFLI", "ABCEFGJK":"EGBCAFJK", "ABCEFGJL":"EGBCAFLJ", "ABCEFGKL":"EGBCAFLK",
+    "ABCEFHIJ":"HJBCAFEI", "ABCEFHIK":"HEBCAFIK", "ABCEFHIL":"HEBCAFLI", "ABCEFHJK":"HJBCAFEK",
+    "ABCEFHJL":"HJBCAFLE", "ABCEFHKL":"HEBCAFLK", "ABCEFIJK":"EJBCAFIK", "ABCEFIJL":"EJBCAFLI",
+    "ABCEFIKL":"EIBCAFLK", "ABCEFJKL":"EJBCAFLK", "ABCEGHIJ":"HJBCAGEI", "ABCEGHIK":"EGBCAHIK",
+    "ABCEGHIL":"EGBCAHLI", "ABCEGHJK":"HJBCAGEK", "ABCEGHJL":"HJBCAGLE", "ABCEGHKL":"EGBCAHLK",
+    "ABCEGIJK":"EJBCAGIK", "ABCEGIJL":"EJBCAGLI", "ABCEGIKL":"EGBAICLK", "ABCEGJKL":"EJBCAGLK",
+    "ABCEHIJK":"EJBCAHIK", "ABCEHIJL":"EJBCAHLI", "ABCEHIKL":"EIBCAHLK", "ABCEHJKL":"EJBCAHLK",
+    "ABCEIJKL":"EJBAICLK", "ABCFGHIJ":"HGBCAFIJ", "ABCFGHIK":"HGBCAFIK", "ABCFGHIL":"HGBCAFLI",
+    "ABCFGHJK":"HGBCAFJK", "ABCFGHJL":"HGBCAFLJ", "ABCFGHKL":"HGBCAFLK", "ABCFGIJK":"CJBFAGIK",
+    "ABCFGIJL":"CJBFAGLI", "ABCFGIKL":"IGBCAFLK", "ABCFGJKL":"CJBFAGLK", "ABCFHIJK":"HJBCAFIK",
+    "ABCFHIJL":"HJBCAFLI", "ABCFHIKL":"HIBCAFLK", "ABCFHJKL":"HJBCAFLK", "ABCFIJKL":"IJBCAFLK",
+    "ABCGHIJK":"HJBCAGIK", "ABCGHIJL":"HJBCAGLI", "ABCGHIKL":"IGBCAHLK", "ABCGHJKL":"HJBCAGLK",
+    "ABCGIJKL":"IJBCAGLK", "ABCHIJKL":"IJBCAHLK", "ABDEFGHI":"HGBDAFEI", "ABDEFGHJ":"HGBDAFEJ",
+    "ABDEFGHK":"HGBDAFEK", "ABDEFGHL":"HGBDAFLE", "ABDEFGIJ":"EGBDAFIJ", "ABDEFGIK":"EGBDAFIK",
+    "ABDEFGIL":"EGBDAFLI", "ABDEFGJK":"EGBDAFJK", "ABDEFGJL":"EGBDAFLJ", "ABDEFGKL":"EGBDAFLK",
+    "ABDEFHIJ":"HJBDAFEI", "ABDEFHIK":"HEBDAFIK", "ABDEFHIL":"HEBDAFLI", "ABDEFHJK":"HJBDAFEK",
+    "ABDEFHJL":"HJBDAFLE", "ABDEFHKL":"HEBDAFLK", "ABDEFIJK":"EJBDAFIK", "ABDEFIJL":"EJBDAFLI",
+    "ABDEFIKL":"EIBDAFLK", "ABDEFJKL":"EJBDAFLK", "ABDEGHIJ":"HJBDAGEI", "ABDEGHIK":"EGBDAHIK",
+    "ABDEGHIL":"EGBDAHLI", "ABDEGHJK":"HJBDAGEK", "ABDEGHJL":"HJBDAGLE", "ABDEGHKL":"EGBDAHLK",
+    "ABDEGIJK":"EJBDAGIK", "ABDEGIJL":"EJBDAGLI", "ABDEGIKL":"EGBAIDLK", "ABDEGJKL":"EJBDAGLK",
+    "ABDEHIJK":"EJBDAHIK", "ABDEHIJL":"EJBDAHLI", "ABDEHIKL":"EIBDAHLK", "ABDEHJKL":"EJBDAHLK",
+    "ABDEIJKL":"EJBAIDLK", "ABDFGHIJ":"HGBDAFIJ", "ABDFGHIK":"HGBDAFIK", "ABDFGHIL":"HGBDAFLI",
+    "ABDFGHJK":"HGBDAFJK", "ABDFGHJL":"HGBDAFLJ", "ABDFGHKL":"HGBDAFLK", "ABDFGIJK":"FJBDAGIK",
+    "ABDFGIJL":"FJBDAGLI", "ABDFGIKL":"IGBDAFLK", "ABDFGJKL":"FJBDAGLK", "ABDFHIJK":"HJBDAFIK",
+    "ABDFHIJL":"HJBDAFLI", "ABDFHIKL":"HIBDAFLK", "ABDFHJKL":"HJBDAFLK", "ABDFIJKL":"IJBDAFLK",
+    "ABDGHIJK":"HJBDAGIK", "ABDGHIJL":"HJBDAGLI", "ABDGHIKL":"IGBDAHLK", "ABDGHJKL":"HJBDAGLK",
+    "ABDGIJKL":"IJBDAGLK", "ABDHIJKL":"IJBDAHLK", "ABEFGHIJ":"HJBFAGEI", "ABEFGHIK":"EGBFAHIK",
+    "ABEFGHIL":"EGBFAHLI", "ABEFGHJK":"HJBFAGEK", "ABEFGHJL":"HJBFAGLE", "ABEFGHKL":"EGBFAHLK",
+    "ABEFGIJK":"EJBFAGIK", "ABEFGIJL":"EJBFAGLI", "ABEFGIKL":"EGBAIFLK", "ABEFGJKL":"EJBFAGLK",
+    "ABEFHIJK":"EJBFAHIK", "ABEFHIJL":"EJBFAHLI", "ABEFHIKL":"EIBFAHLK", "ABEFHJKL":"EJBFAHLK",
+    "ABEFIJKL":"EJBAIFLK", "ABEGHIJK":"EJBAHGIK", "ABEGHIJL":"EJBAHGLI", "ABEGHIKL":"EGBAIHLK",
+    "ABEGHJKL":"EJBAHGLK", "ABEGIJKL":"EJBAIGLK", "ABEHIJKL":"EJBAIHLK", "ABFGHIJK":"HJBFAGIK",
+    "ABFGHIJL":"HJBFAGLI", "ABFGHIKL":"HGBAIFLK", "ABFGHJKL":"HJBFAGLK", "ABFGIJKL":"IJBFAGLK",
+    "ABFHIJKL":"HJBAIFLK", "ABGHIJKL":"HJBAIGLK", "ACDEFGHI":"HGECAFDI", "ACDEFGHJ":"HGJCAFDE",
+    "ACDEFGHK":"HGECAFDK", "ACDEFGHL":"HGFCADLE", "ACDEFGIJ":"CGJDAFEI", "ACDEFGIK":"CGEDAFIK",
+    "ACDEFGIL":"CGEDAFLI", "ACDEFGJK":"CGJDAFEK", "ACDEFGJL":"CGJDAFLE", "ACDEFGKL":"CGEDAFLK",
+    "ACDEFHIJ":"HJECAFDI", "ACDEFHIK":"HEFCADIK", "ACDEFHIL":"HEFCADLI", "ACDEFHJK":"HJECAFDK",
+    "ACDEFHJL":"HJFCADLE", "ACDEFHKL":"HEFCADLK", "ACDEFIJK":"CJEDAFIK", "ACDEFIJL":"CJEDAFLI",
+    "ACDEFIKL":"CEIDAFLK", "ACDEFJKL":"CJEDAFLK", "ACDEGHIJ":"HGJCADEI", "ACDEGHIK":"HGECADIK",
+    "ACDEGHIL":"HGECADLI", "ACDEGHJK":"HGJCADEK", "ACDEGHJL":"HGJCADLE", "ACDEGHKL":"HGECADLK",
+    "ACDEGIJK":"EGJCADIK", "ACDEGIJL":"EGJCADLI", "ACDEGIKL":"EGICADLK", "ACDEGJKL":"EGJCADLK",
+    "ACDEHIJK":"HJECADIK", "ACDEHIJL":"HJECADLI", "ACDEHIKL":"HEICADLK", "ACDEHJKL":"HJECADLK",
+    "ACDEIJKL":"EJICADLK", "ACDFGHIJ":"HGJCAFDI", "ACDFGHIK":"HGFCADIK", "ACDFGHIL":"HGFCADLI",
+    "ACDFGHJK":"HGJCAFDK", "ACDFGHJL":"CGJDAFLH", "ACDFGHKL":"HGFCADLK", "ACDFGIJK":"CGJDAFIK",
+    "ACDFGIJL":"CGJDAFLI", "ACDFGIKL":"CGIDAFLK", "ACDFGJKL":"CGJDAFLK", "ACDFHIJK":"HJFCADIK",
+    "ACDFHIJL":"HJFCADLI", "ACDFHIKL":"HFICADLK", "ACDFHJKL":"HJFCADLK", "ACDFIJKL":"CJIDAFLK",
+    "ACDGHIJK":"HGJCADIK", "ACDGHIJL":"HGJCADLI", "ACDGHIKL":"HGICADLK", "ACDGHJKL":"HGJCADLK",
+    "ACDGIJKL":"IGJCADLK", "ACDHIJKL":"HJICADLK", "ACEFGHIJ":"HGJCAFEI", "ACEFGHIK":"HGECAFIK",
+    "ACEFGHIL":"HGECAFLI", "ACEFGHJK":"HGJCAFEK", "ACEFGHJL":"HGJCAFLE", "ACEFGHKL":"HGECAFLK",
+    "ACEFGIJK":"EGJCAFIK", "ACEFGIJL":"EGJCAFLI", "ACEFGIKL":"EGICAFLK", "ACEFGJKL":"EGJCAFLK",
+    "ACEFHIJK":"HJECAFIK", "ACEFHIJL":"HJECAFLI", "ACEFHIKL":"HEICAFLK", "ACEFHJKL":"HJECAFLK",
+    "ACEFIJKL":"EJICAFLK", "ACEGHIJK":"EGJCAHIK", "ACEGHIJL":"EGJCAHLI", "ACEGHIKL":"EGICAHLK",
+    "ACEGHJKL":"EGJCAHLK", "ACEGIJKL":"EJICAGLK", "ACEHIJKL":"EJICAHLK", "ACFGHIJK":"HGJCAFIK",
+    "ACFGHIJL":"HGJCAFLI", "ACFGHIKL":"HGICAFLK", "ACFGHJKL":"HGJCAFLK", "ACFGIJKL":"IGJCAFLK",
+    "ACFHIJKL":"HJICAFLK", "ACGHIJKL":"HJICAGLK", "ADEFGHIJ":"HGJDAFEI", "ADEFGHIK":"HGEDAFIK",
+    "ADEFGHIL":"HGEDAFLI", "ADEFGHJK":"HGJDAFEK", "ADEFGHJL":"HGJDAFLE", "ADEFGHKL":"HGEDAFLK",
+    "ADEFGIJK":"EGJDAFIK", "ADEFGIJL":"EGJDAFLI", "ADEFGIKL":"EGIDAFLK", "ADEFGJKL":"EGJDAFLK",
+    "ADEFHIJK":"HJEDAFIK", "ADEFHIJL":"HJEDAFLI", "ADEFHIKL":"HEIDAFLK", "ADEFHJKL":"HJEDAFLK",
+    "ADEFIJKL":"EJIDAFLK", "ADEGHIJK":"EGJDAHIK", "ADEGHIJL":"EGJDAHLI", "ADEGHIKL":"EGIDAHLK",
+    "ADEGHJKL":"EGJDAHLK", "ADEGIJKL":"EJIDAGLK", "ADEHIJKL":"EJIDAHLK", "ADFGHIJK":"HGJDAFIK",
+    "ADFGHIJL":"HGJDAFLI", "ADFGHIKL":"HGIDAFLK", "ADFGHJKL":"HGJDAFLK", "ADFGIJKL":"IGJDAFLK",
+    "ADFHIJKL":"HJIDAFLK", "ADGHIJKL":"HJIDAGLK", "AEFGHIJK":"EGJFAHIK", "AEFGHIJL":"EGJFAHLI",
+    "AEFGHIKL":"EGIFAHLK", "AEFGHJKL":"EGJFAHLK", "AEFGIJKL":"EJIFAGLK", "AEFHIJKL":"EJIFAHLK",
+    "AEGHIJKL":"EJIAHGLK", "AFGHIJKL":"HJIFAGLK", "BCDEFGHI":"CGBDHFEI", "BCDEFGHJ":"HGBCJFDE",
+    "BCDEFGHK":"CGBDHFEK", "BCDEFGHL":"CGBDHFLE", "BCDEFGIJ":"CGBDJFEI", "BCDEFGIK":"CGBDEFIK",
+    "BCDEFGIL":"CGBDEFLI", "BCDEFGJK":"CGBDJFEK", "BCDEFGJL":"CGBDJFLE", "BCDEFGKL":"CGBDEFLK",
+    "BCDEFHIJ":"CJBDHFEI", "BCDEFHIK":"CEBDHFIK", "BCDEFHIL":"CEBDHFLI", "BCDEFHJK":"CJBDHFEK",
+    "BCDEFHJL":"CJBDHFLE", "BCDEFHKL":"CEBDHFLK", "BCDEFIJK":"CJBDEFIK", "BCDEFIJL":"CJBDEFLI",
+    "BCDEFIKL":"CEBDIFLK", "BCDEFJKL":"CJBDEFLK", "BCDEGHIJ":"HGBCJDEI", "BCDEGHIK":"EGBCHDIK",
+    "BCDEGHIL":"EGBCHDLI", "BCDEGHJK":"HGBCJDEK", "BCDEGHJL":"HGBCJDLE", "BCDEGHKL":"EGBCHDLK",
+    "BCDEGIJK":"EGBCJDIK", "BCDEGIJL":"EGBCJDLI", "BCDEGIKL":"EGBCIDLK", "BCDEGJKL":"EGBCJDLK",
+    "BCDEHIJK":"EJBCHDIK", "BCDEHIJL":"EJBCHDLI", "BCDEHIKL":"EIBCHDLK", "BCDEHJKL":"EJBCHDLK",
+    "BCDEIJKL":"EJBCIDLK", "BCDFGHIJ":"HGBCJFDI", "BCDFGHIK":"CGBDHFIK", "BCDFGHIL":"CGBDHFLI",
+    "BCDFGHJK":"HGBCJFDK", "BCDFGHJL":"CGBDHFLJ", "BCDFGHKL":"CGBDHFLK", "BCDFGIJK":"CGBDJFIK",
+    "BCDFGIJL":"CGBDJFLI", "BCDFGIKL":"CGBDIFLK", "BCDFGJKL":"CGBDJFLK", "BCDFHIJK":"CJBDHFIK",
+    "BCDFHIJL":"CJBDHFLI", "BCDFHIKL":"CIBDHFLK", "BCDFHJKL":"CJBDHFLK", "BCDFIJKL":"CJBDIFLK",
+    "BCDGHIJK":"HGBCJDIK", "BCDGHIJL":"HGBCJDLI", "BCDGHIKL":"HGBCIDLK", "BCDGHJKL":"HGBCJDLK",
+    "BCDGIJKL":"IGBCJDLK", "BCDHIJKL":"HJBCIDLK", "BCEFGHIJ":"HGBCJFEI", "BCEFGHIK":"EGBCHFIK",
+    "BCEFGHIL":"EGBCHFLI", "BCEFGHJK":"HGBCJFEK", "BCEFGHJL":"HGBCJFLE", "BCEFGHKL":"EGBCHFLK",
+    "BCEFGIJK":"EGBCJFIK", "BCEFGIJL":"EGBCJFLI", "BCEFGIKL":"EGBCIFLK", "BCEFGJKL":"EGBCJFLK",
+    "BCEFHIJK":"EJBCHFIK", "BCEFHIJL":"EJBCHFLI", "BCEFHIKL":"EIBCHFLK", "BCEFHJKL":"EJBCHFLK",
+    "BCEFIJKL":"EJBCIFLK", "BCEGHIJK":"EJBCHGIK", "BCEGHIJL":"EJBCHGLI", "BCEGHIKL":"EGBCIHLK",
+    "BCEGHJKL":"EJBCHGLK", "BCEGIJKL":"EJBCIGLK", "BCEHIJKL":"EJBCIHLK", "BCFGHIJK":"HGBCJFIK",
+    "BCFGHIJL":"HGBCJFLI", "BCFGHIKL":"HGBCIFLK", "BCFGHJKL":"HGBCJFLK", "BCFGIJKL":"IGBCJFLK",
+    "BCFHIJKL":"HJBCIFLK", "BCGHIJKL":"HJBCIGLK", "BDEFGHIJ":"HGBDJFEI", "BDEFGHIK":"EGBDHFIK",
+    "BDEFGHIL":"EGBDHFLI", "BDEFGHJK":"HGBDJFEK", "BDEFGHJL":"HGBDJFLE", "BDEFGHKL":"EGBDHFLK",
+    "BDEFGIJK":"EGBDJFIK", "BDEFGIJL":"EGBDJFLI", "BDEFGIKL":"EGBDIFLK", "BDEFGJKL":"EGBDJFLK",
+    "BDEFHIJK":"EJBDHFIK", "BDEFHIJL":"EJBDHFLI", "BDEFHIKL":"EIBDHFLK", "BDEFHJKL":"EJBDHFLK",
+    "BDEFIJKL":"EJBDIFLK", "BDEGHIJK":"EJBDHGIK", "BDEGHIJL":"EJBDHGLI", "BDEGHIKL":"EGBDIHLK",
+    "BDEGHJKL":"EJBDHGLK", "BDEGIJKL":"EJBDIGLK", "BDEHIJKL":"EJBDIHLK", "BDFGHIJK":"HGBDJFIK",
+    "BDFGHIJL":"HGBDJFLI", "BDFGHIKL":"HGBDIFLK", "BDFGHJKL":"HGBDJFLK", "BDFGIJKL":"IGBDJFLK",
+    "BDFHIJKL":"HJBDIFLK", "BDGHIJKL":"HJBDIGLK", "BEFGHIJK":"EJBFHGIK", "BEFGHIJL":"EJBFHGLI",
+    "BEFGHIKL":"EGBFIHLK", "BEFGHJKL":"EJBFHGLK", "BEFGIJKL":"EJBFIGLK", "BEFHIJKL":"EJBFIHLK",
+    "BEGHIJKL":"EJIBHGLK", "BFGHIJKL":"HJBFIGLK", "CDEFGHIJ":"CGJDHFEI", "CDEFGHIK":"CGEDHFIK",
+    "CDEFGHIL":"CGEDHFLI", "CDEFGHJK":"CGJDHFEK", "CDEFGHJL":"CGJDHFLE", "CDEFGHKL":"CGEDHFLK",
+    "CDEFGIJK":"CGEDJFIK", "CDEFGIJL":"CGEDJFLI", "CDEFGIKL":"CGEDIFLK", "CDEFGJKL":"CGEDJFLK",
+    "CDEFHIJK":"CJEDHFIK", "CDEFHIJL":"CJEDHFLI", "CDEFHIKL":"CEIDHFLK", "CDEFHJKL":"CJEDHFLK",
+    "CDEFIJKL":"CJEDIFLK", "CDEGHIJK":"EGJCHDIK", "CDEGHIJL":"EGJCHDLI", "CDEGHIKL":"EGICHDLK",
+    "CDEGHJKL":"EGJCHDLK", "CDEGIJKL":"EGICJDLK", "CDEHIJKL":"EJICHDLK", "CDFGHIJK":"CGJDHFIK",
+    "CDFGHIJL":"CGJDHFLI", "CDFGHIKL":"CGIDHFLK", "CDFGHJKL":"CGJDHFLK", "CDFGIJKL":"CGIDJFLK",
+    "CDFHIJKL":"CJIDHFLK", "CDGHIJKL":"HGICJDLK", "CEFGHIJK":"EGJCHFIK", "CEFGHIJL":"EGJCHFLI",
+    "CEFGHIKL":"EGICHFLK", "CEFGHJKL":"EGJCHFLK", "CEFGIJKL":"EGICJFLK", "CEFHIJKL":"EJICHFLK",
+    "CEGHIJKL":"EJICHGLK", "CFGHIJKL":"HGICJFLK", "DEFGHIJK":"EGJDHFIK", "DEFGHIJL":"EGJDHFLI",
+    "DEFGHIKL":"EGIDHFLK", "DEFGHJKL":"EGJDHFLK", "DEFGIJKL":"EGIDJFLK", "DEFHIJKL":"EJIDHFLK",
+    "DEGHIJKL":"EJIDHGLK", "DFGHIJKL":"HGIDJFLK", "EFGHIJKL":"EJIFHGLK",
+}
+
+
+def best_eight_third_slots(thirds):
+    """Map each R32 winner slot to its third-placed opponent per FIFA Annex C.
+
+    `thirds` is {group_letter: (team_id, pts, gd, gf)} and must cover ALL 12 groups —
+    the 8/12 cut depends on the full set, so a partial dict yields {}. Returns
+    {winner_group_letter: third_place_team_id}, or {} if the combination is unknown."""
+    if len(thirds) != 12:
+        return {}
+    order = sorted(thirds.items(), key=lambda kv: (-kv[1][1], -kv[1][2], -kv[1][3], kv[0]))
+    qualifiers = [letter for letter, _ in order[:8]]
+    assigned = THIRD_PLACE_TABLE.get("".join(sorted(qualifiers)))
+    if not assigned:
+        return {}
+    return {win: thirds[grp][0] for win, grp in zip(THIRD_PLACE_WINNER_ORDER, assigned)}
+
 SCORE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1115,8 +1265,8 @@ class LiveTracker(commands.Cog):
 
     # ── Resolve bracket (winners/runners + match winner/loser) ───────────────────
     async def _resolve_bracket(self, s):
-        # group winners/runners for fully-finished groups
-        first, second = {}, {}
+        # group winners/runners/thirds for fully-finished groups
+        first, second, third = {}, {}, {}
         for letter in [chr(c) for c in range(ord("A"), ord("L") + 1)]:
             gm = (await s.execute(
                 text("SELECT finished FROM matches WHERE type='group' AND \"group\"=:g"), {"g": letter}
@@ -1124,11 +1274,14 @@ class LiveTracker(commands.Cog):
             if not gm or not all(gm):
                 continue
             ranked = (await s.execute(
-                text('SELECT team_id FROM group_standings WHERE "group"=:g ORDER BY pts DESC, gd DESC, gf DESC'),
+                text('SELECT team_id, pts, gd, gf FROM group_standings WHERE "group"=:g ORDER BY pts DESC, gd DESC, gf DESC'),
                 {"g": letter},
-            )).scalars().all()
+            )).mappings().all()
             if len(ranked) >= 2:
-                first[letter], second[letter] = ranked[0], ranked[1]
+                first[letter], second[letter] = ranked[0]["team_id"], ranked[1]["team_id"]
+            if len(ranked) >= 3:
+                r3 = ranked[2]
+                third[letter] = (r3["team_id"], r3["pts"] or 0, r3["gd"] or 0, r3["gf"] or 0)
 
         ko = (await s.execute(text("""
             SELECT id, home_team_id, away_team_id, home_team_label, away_team_label,
@@ -1169,15 +1322,28 @@ class LiveTracker(commands.Cog):
                 return win if low.startswith("winner") else lose
             return None
 
+        # Best-eight thirds → R32 winner slots (Annex C). Fires only once every group is
+        # final (the cut depends on all 12); a "3rd Group …" slot's occupant is dictated
+        # by the OTHER side's "Winner Group X" label.
+        third_by_winner = best_eight_third_slots(third)
+
+        def resolve_third(side_label, other_label):
+            if not side_label or not side_label.strip().lower().startswith("3rd group"):
+                return None
+            ol = (other_label or "").strip()
+            if not ol.lower().startswith("winner group "):
+                return None
+            return third_by_winner.get(ol[-1].upper())
+
         for m in ko:
             # Participants may still change while the match has not started and has no
             # result; once it is live or final, freeze it — so a late correction to a
             # group result reflows here, but played games never move.
             mutable = (not m["finished"]) and m["home_score"] is None and m["away_score"] is None
-            new_home = resolve(m["home_team_label"])
+            new_home = resolve(m["home_team_label"]) or resolve_third(m["home_team_label"], m["away_team_label"])
             if new_home and new_home != m["home_team_id"] and (m["home_team_id"] is None or mutable):
                 await s.execute(text("UPDATE matches SET home_team_id=:t WHERE id=:i"), {"t": new_home, "i": m["id"]})
-            new_away = resolve(m["away_team_label"])
+            new_away = resolve(m["away_team_label"]) or resolve_third(m["away_team_label"], m["home_team_label"])
             if new_away and new_away != m["away_team_id"] and (m["away_team_id"] is None or mutable):
                 await s.execute(text("UPDATE matches SET away_team_id=:t WHERE id=:i"), {"t": new_away, "i": m["id"]})
 
