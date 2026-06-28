@@ -6,7 +6,6 @@ import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { withPermission } from '@/lib/components/with-permission';
 import { PermissionLevel } from '@/lib/permissions';
-import { usePermissions } from '@/lib/hooks/use-permissions';
 import { useTranslation } from '@/lib/i18n';
 import { apiClient } from '@/app/api-client';
 
@@ -22,10 +21,6 @@ interface OpenResponse {
   enabled: boolean;
   open_match_ids: number[];
   picks: Record<string, { home: number; away: number; points: number }>;
-}
-interface Pool {
-  name: string; weight_exact: number; weight_diff: number; weight_tendency: number;
-  knockout_multiplier: number; lock_lead_minutes: number; enabled: boolean;
 }
 interface Section {
   key: string; title: string; matches: MatchBrief[];
@@ -57,78 +52,9 @@ function Bar({ done, total }: { done: number; total: number }) {
   );
 }
 
-// Developer-only pool configuration form (weights / lock / enabled).
-function PoolConfig({ guildId }: { guildId: string }) {
-  const { t } = useTranslation();
-  const [pool, setPool] = useState<Pool | null>(null);
-  const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-
-  useEffect(() => {
-    apiClient.get<Pool>(`/guilds/${guildId}/predictions/pool`).then(setPool).catch(() => setStatus('error'));
-  }, [guildId]);
-
-  const num = (k: keyof Pool) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setPool((p) => (p ? { ...p, [k]: Number(e.target.value) } : p));
-
-  const save = async () => {
-    if (!pool) return;
-    setStatus('saving');
-    try {
-      const saved = await apiClient.put<Pool>(`/guilds/${guildId}/predictions/pool`, pool);
-      setPool(saved);
-      setStatus('saved');
-    } catch {
-      setStatus('error');
-    }
-  };
-
-  if (!pool) return null;
-
-  const Field = ({ label, k, min = 0 }: { label: string; k: keyof Pool; min?: number }) => (
-    <label className="flex flex-col gap-1 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <input type="number" min={min} value={pool[k] as number} onChange={num(k)}
-        className="rounded-md border border-border bg-background px-2 py-1" />
-    </label>
-  );
-
-  return (
-    <div className="rounded-lg border border-border bg-card p-5 space-y-4">
-      <h2 className="font-semibold text-foreground">{t('predictions.poolConfig')}</h2>
-      <label className="flex items-center gap-2 text-sm text-foreground">
-        <input type="checkbox" checked={pool.enabled} onChange={(e) => setPool({ ...pool, enabled: e.target.checked })} />
-        {t('predictions.enabled')}
-      </label>
-      <label className="flex flex-col gap-1 text-sm">
-        <span className="text-muted-foreground">{t('predictions.fieldName')}</span>
-        <input value={pool.name} onChange={(e) => setPool({ ...pool, name: e.target.value })}
-          className="rounded-md border border-border bg-background px-2 py-1" />
-      </label>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <Field label={t('predictions.weightExact')} k="weight_exact" />
-        <Field label={t('predictions.weightDiff')} k="weight_diff" />
-        <Field label={t('predictions.weightTendency')} k="weight_tendency" />
-        <Field label={t('predictions.knockoutMultiplier')} k="knockout_multiplier" min={1} />
-        <Field label={t('predictions.lockLead')} k="lock_lead_minutes" />
-      </div>
-      <div className="flex items-center gap-3">
-        <button onClick={save} disabled={status === 'saving'}
-          className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50">
-          {status === 'saving' ? t('common.loading') : t('predictions.save')}
-        </button>
-        {status === 'saved' && <span className="text-sm text-muted-foreground">{t('predictions.saved')}</span>}
-        {status === 'error' && <span className="text-sm text-destructive">{t('predictions.saveError')}</span>}
-      </div>
-      <p className="text-xs text-muted-foreground">{t('predictions.adminOnly')}</p>
-    </div>
-  );
-}
-
 function PredictionsPage() {
   const { t, language } = useTranslation();
   const guildId = useParams().guildId as string;
-  const { permissionLevel } = usePermissions(guildId);
-  const isDeveloper = permissionLevel >= PermissionLevel.DEVELOPER;
   const locale = language === 'es' ? 'es-ES' : 'en-US';
 
   const [matches, setMatches] = useState<MatchBrief[]>([]);
@@ -373,8 +299,6 @@ function PredictionsPage() {
             : <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{daySecs.map((s) => <Card key={s.key} s={s} />)}</div>}
         </div>
       )}
-
-      {isDeveloper && <PoolConfig guildId={guildId} />}
     </div>
   );
 }
