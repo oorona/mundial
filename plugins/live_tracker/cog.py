@@ -1336,10 +1336,11 @@ class LiveTracker(commands.Cog):
             return third_by_winner.get(ol[-1].upper())
 
         for m in ko:
-            # Participants may still change while the match has not started and has no
-            # result; once it is live or final, freeze it — so a late correction to a
-            # group result reflows here, but played games never move.
-            mutable = (not m["finished"]) and m["home_score"] is None and m["away_score"] is None
+            # Participants may still change while the match has not been played. Unplayed
+            # fixtures carry placeholder 0-0 scores (not NULL), so treat a falsy (NULL or
+            # 0) score as "no result"; a real live score (non-zero) or a finished match
+            # freezes the slot — a late group correction reflows, played games never move.
+            mutable = (not m["finished"]) and not m["home_score"] and not m["away_score"]
             new_home = resolve(m["home_team_label"]) or resolve_third(m["home_team_label"], m["away_team_label"])
             if new_home and new_home != m["home_team_id"] and (m["home_team_id"] is None or mutable):
                 await s.execute(text("UPDATE matches SET home_team_id=:t WHERE id=:i"), {"t": new_home, "i": m["id"]})

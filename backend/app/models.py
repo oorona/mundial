@@ -808,10 +808,12 @@ async def resolve_bracket(session: AsyncSession) -> int:
         return third_by_winner.get(ol[-1].upper())
 
     def _mutable(m) -> bool:
-        # A slot's participants may still change while the knockout match has not
-        # started and carries no result. Once it is live or final, freeze it — so a
-        # late correction to a group result reflows here, but played games never move.
-        return (not m.finished) and m.home_score is None and m.away_score is None
+        # A slot's participants may still change while the knockout match has not been
+        # played. Unplayed fixtures carry placeholder 0-0 scores (not NULL), so treat a
+        # falsy (NULL or 0) score as "no result"; a real live score (non-zero) or a
+        # finished match freezes the slot. This lets a late group-result correction
+        # reflow here while played games never move.
+        return (not m.finished) and not m.home_score and not m.away_score
 
     filled = 0
     for m in ko:
