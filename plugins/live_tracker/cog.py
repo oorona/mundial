@@ -313,6 +313,32 @@ _RECONCILE_SQL = text("""
       AND m.kickoff_at >= now() - interval '6 hours'
 """)
 
+# Stuck-final rescue. The live window stops polling a knockout at kickoff+3h and a group
+# at +2h30m; the reconcile sweep above only re-reads matches that already committed
+# (finished = true). A game whose final never reached the confidence floor during its
+# window is therefore stranded at finished=false with a placeholder score, and NOTHING
+# revisits it — the bracket can't advance past that slot (a knockout that went to
+# penalties is the classic case: the shootout confuses the live read, the window closes,
+# and the slot freezes). This picks up such stranded games once they're well settled and
+# does one grounded final read to commit them. Lower bound mirrors the live-window caps so
+# we never race a live commit; upper bound is generous (12h) because a stuck game may not
+# be noticed for hours. Older than that → admin override.
+_RESCUE_SQL = text("""
+    SELECT m.id AS id, m.type AS round_code,
+           ht.name_en AS home_name, at.name_en AS away_name,
+           m.home_score AS hs, m.away_score AS as_,
+           m.home_pens AS hp, m.away_pens AS ap
+    FROM matches m
+    JOIN teams ht ON ht.id = m.home_team_id
+    JOIN teams at ON at.id = m.away_team_id
+    WHERE m.finished = false
+      AND m.kickoff_at IS NOT NULL
+      AND m.kickoff_at <= now() - (CASE WHEN m.type = 'group'
+                                        THEN interval '160 minutes'
+                                        ELSE interval '185 minutes' END)
+      AND m.kickoff_at >= now() - interval '12 hours'
+""")
+
 
 class LiveTracker(commands.Cog):
     """AI live-score worker: polls in-progress matches, commits confident finals, recomputes standings/bracket, re-scores predictions, and streams live events to Discord + the web."""
@@ -400,6 +426,12 @@ class LiveTracker(commands.Cog):
             await self._reconcile_finals(provider)
         except Exception as e:
             log.warning("live_tracker: reconcile pass failed: %r", e)
+        # Rescue any final that never committed during its live window (stuck finished=false
+        # → bracket frozen). Isolated so a hiccup never kills the tick loop.
+        try:
+            await self._rescue_stuck_finals(provider)
+        except Exception as e:
+            log.warning("live_tracker: rescue pass failed: %r", e)
 
     async def _fresh_window_wipe(self):
         """When a live window OPENS (no game was in window before this tick), clear
@@ -1039,15 +1071,21 @@ class LiveTracker(commands.Cog):
                 "Eres un asistente que verifica el resultado FINAL de un partido del Mundial 2026 "
                 "usando la búsqueda en internet. Responde ÚNICAMENTE en español (es-MX)."
             )
+            ko_clause = (
+                " Es un partido de eliminación directa: si terminó empatado tras el tiempo reglamentario y "
+                "la prórroga, se definió por penales — dame el marcador de la tanda en home_pens/away_pens y "
+                "asegúrate de que el equipo que AVANZÓ tenga más penales. El marcador a tiempo completo "
+                "(home_score/away_score) NO incluye los penales."
+            ) if (m.get("round_code") or "group") != "group" else ""
             user = (
                 f"El partido {m['home_name']} vs {m['away_name']} del Mundial 2026 YA TERMINÓ hace cerca "
                 f"de una hora. Usando la búsqueda en crónicas POSTERIORES al partido (resultado final, NO "
                 f"transmisiones en vivo ni resúmenes del medio tiempo), dame el MARCADOR FINAL definitivo a "
                 f"tiempo completo y la lista completa de goles (goleador y minuto, incluidos los del tiempo "
-                f"añadido y la prórroga). Tengo registrado {m['home_name']} {m.get('hs')}–{m.get('as_')} "
-                f"{m['away_name']}; confírmalo, o corrígelo SOLO si varias fuentes coinciden claramente en "
-                f"otro marcador final. Marca finished=true y confianza alta únicamente si las fuentes "
-                f"concuerdan en el resultado definitivo."
+                f"añadido y la prórroga)." + ko_clause + f" Tengo registrado {m['home_name']} "
+                f"{m.get('hs')}–{m.get('as_')} {m['away_name']}; confírmalo, o corrígelo SOLO si varias "
+                f"fuentes coinciden claramente en otro marcador final. Marca finished=true y confianza alta "
+                f"únicamente si las fuentes concuerdan en el resultado definitivo."
             )
             grounded = await provider.generate_response(
                 [LLMMessage(role="user", content=user)],
@@ -1108,6 +1146,68 @@ class LiveTracker(commands.Cog):
                 changed = True
                 log.warning("live_tracker: reconcile corrected match %s from %s-%s to %s-%s "
                             "(late goal missed at commit)", m["id"], m["hs"], m["as_"], int(hs), int(as_))
+            if changed:
+                await self._recompute_standings(s)
+                await self._resolve_bracket(s)
+                await self._rescore(s)
+            await s.commit()
+
+    async def _rescue_stuck_finals(self, provider):
+        """Commit a knockout/group final that never auto-committed during its live window.
+
+        The live window stops polling a game at kickoff+2h30m (group) / +3h (knockout), and
+        the reconcile pass only re-reads matches already finished=true. A final that never
+        cleared the confidence floor in its window is left at finished=false with a
+        placeholder score and is otherwise never revisited — the bracket freezes at that
+        slot (a penalty shootout is the usual culprit). This sweep does one grounded final
+        read per stranded game and commits it on a confident result, then recomputes
+        standings / bracket / predictions so the bracket can advance. Fires at most once per
+        match (Redis marker set only after a confident commit, so a failed read retries)."""
+        if not provider or not self.redis:
+            return
+        async with self.db.worker_session() as s:
+            stuck = [dict(r) for r in (await s.execute(_RESCUE_SQL)).mappings().all()]
+        pending = []
+        for m in stuck:
+            try:
+                if await self.redis.get(f"live:rescued:{m['id']}"):
+                    continue
+            except Exception:
+                pass
+            pending.append(m)
+        if not pending:
+            return
+        changed = False
+        async with self.db.worker_session() as s:
+            for m in pending:
+                r = await self._ai_final(provider, m)
+                if not r or not r.get("finished"):
+                    continue
+                hs, as_ = r.get("home_score"), r.get("away_score")
+                if hs is None or as_ is None or float(r.get("confidence", 0)) < 0.8:
+                    continue
+                hp, ap = r.get("home_pens"), r.get("away_pens")
+                # A knockout that finished level needs a shootout result to resolve a winner;
+                # without it match_winner_loser() can't advance the slot, so don't commit yet
+                # (retry next tick — a later read may surface the pens). Leave the marker unset.
+                if (m.get("round_code") or "group") != "group" and int(hs) == int(as_) \
+                        and (hp is None or ap is None or int(hp) == int(ap)):
+                    continue
+                res = await s.execute(
+                    text("""UPDATE matches
+                            SET home_score = :hs, away_score = :as_, finished = true,
+                                home_pens = :hp, away_pens = :ap, time_elapsed = 'FT'
+                            WHERE id = :id AND finished = false"""),
+                    {"hs": int(hs), "as_": int(as_), "hp": hp, "ap": ap, "id": m["id"]},
+                )
+                if res.rowcount:
+                    changed = True
+                    try:
+                        await self.redis.set(f"live:rescued:{m['id']}", "1", ex=86400)
+                    except Exception:
+                        pass
+                    log.warning("live_tracker: rescued stranded final match %s -> %s-%s (pens %s-%s)",
+                                m["id"], int(hs), int(as_), hp, ap)
             if changed:
                 await self._recompute_standings(s)
                 await self._resolve_bracket(s)
