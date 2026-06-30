@@ -31,6 +31,10 @@ from app.db.redis import get_redis
 from app.db.session import get_db
 from app.models import GoalClip
 
+import logging
+
+log = logging.getLogger("goal_clips")
+
 router = APIRouter()
 
 VIDEOS_DIR = Path("/data/videos")
@@ -138,8 +142,11 @@ async def ingest_clip(
             "clip_id": clip.id, "tweet_id": tweet_id, "text": text or "",
         }))
         await redis.expire("goal_clips:incoming", 6 * 3600)
-    except Exception:
-        pass
+    except Exception as e:
+        # A silent failure here strands the clip: the DB row exists (status=received) but
+        # the bot's relay loop never sees it, so it never posts. Log loudly so a broken
+        # Redis hand-off is diagnosable instead of looking like "clips just don't appear".
+        log.warning("goal_clips: failed to enqueue clip %s to goal_clips:incoming: %r", clip.id, e)
 
     return {"id": clip.id, "duplicate": False}
 

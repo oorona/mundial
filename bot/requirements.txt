@@ -11,7 +11,11 @@ PyYAML>=6.0
 # openai and anthropic commented out - large downloads, uncomment if needed
 # openai>=1.10.0
 # anthropic>=0.18.0
-google-genai>=1.50.0
+# Pinned: an unpinned >= range floats to a google-genai whose aiohttp transport needs
+# aiohttp>=3.10.6 (ClientConnectorDNSError), but aiohttp is pinned to 3.9.1 for discord.py
+# 2.3.2. A bare `--build` silently pulled a breaking version and took down every AI call.
+# A compat shim in services/llm.py covers the attribute gap; this pin keeps builds reproducible.
+google-genai==2.10.0
 spacy>=3.7.0
 # spaCy's CLI imports `click` directly (e.g. `from click import NoSuchOption` in
 # spacy/cli/_util.py), but modern typer (0.26+) no longer depends on click, so it's

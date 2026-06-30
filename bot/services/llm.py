@@ -5,6 +5,16 @@ import contextvars
 import time
 import aiohttp
 from abc import ABC, abstractmethod
+
+# Compat shim: google-genai's aiohttp transport references aiohttp.ClientConnectorDNSError
+# (added in aiohttp 3.10.6) inside its retry/except clauses. We pin aiohttp==3.9.1 for
+# discord.py 2.3.2 compatibility, where that attribute does not exist, so every async genai
+# call raised "module aiohttp has no attribute ClientConnectorDNSError" and failed. Alias it
+# to its parent ClientConnectorError (ClientConnectorDNSError is a subclass of it in newer
+# aiohttp), so genai's except tuples resolve — catching the parent is a safe superset. Remove
+# if/when aiohttp is bumped past 3.10.6.
+if not hasattr(aiohttp, "ClientConnectorDNSError"):
+    aiohttp.ClientConnectorDNSError = aiohttp.ClientConnectorError
 from contextlib import contextmanager
 from typing import List, Dict, Optional, Any, Union, Callable
 from dataclasses import dataclass, asdict, field

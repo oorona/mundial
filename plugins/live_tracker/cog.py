@@ -714,13 +714,19 @@ class LiveTracker(commands.Cog):
         """Set a goal_clips row's status (and posted_at when 'posted'). Best-effort."""
         try:
             async with self.db.worker_session() as s:
+                # :st is bound once (status, varchar). The 'posted' test uses a SEPARATE
+                # boolean param — reusing :st in both `status=:st` and `:st='posted'` makes
+                # asyncpg deduce conflicting types (varchar vs text) and raise
+                # AmbiguousParameterError, which the except below swallowed: every clip was
+                # left stuck at 'received'.
                 await s.execute(text(
                     "UPDATE goal_clips SET status=:st, "
-                    "posted_at=CASE WHEN :st='posted' THEN now() ELSE posted_at END "
-                    "WHERE id=:i"), {"st": status, "i": clip_id})
+                    "posted_at=CASE WHEN :is_posted THEN now() ELSE posted_at END "
+                    "WHERE id=:i"),
+                    {"st": status, "is_posted": status == "posted", "i": clip_id})
                 await s.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("live_tracker: mark clip %s -> %s failed: %r", clip_id, status, e)
 
     async def _caption_for_clip(self, text_en: str, live: list[dict]) -> tuple[bool, int, str]:
         """Vet a Fox clip against the currently-live match(es) AND translate it, in one call.
