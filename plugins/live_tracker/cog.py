@@ -1317,7 +1317,18 @@ class LiveTracker(commands.Cog):
                 #    before we ever commit. The grounded AI reports finished=false while
                 #    a knockout is in ET, so this flat floor is safe there too.
                 # Once both pass, finished=true commits and polling stops entirely.
-                if await self._final_confirmed(m["id"], r["home_score"], r["away_score"]):
+                # 3. decisive shootout — a LEVEL knockout must have pens that pick a winner.
+                #    Committing a level score with tied/missing pens (an intermediate tally
+                #    the AI caught mid-shootout) freezes the bracket: match_winner_loser
+                #    can't resolve a winner. Hold until a later read brings decisive pens
+                #    (the rescue sweep re-reads with a pens-specific prompt once settled).
+                ko = (m.get("round_code") or "group") != "group"
+                hp, ap = r.get("home_pens"), r.get("away_pens")
+                if ko and int(r["home_score"]) == int(r["away_score"]) \
+                        and (hp is None or ap is None or int(hp) == int(ap)):
+                    log.info("live_tracker: holding level knockout final for match %s — "
+                             "shootout not decided yet (pens %s-%s)", m["id"], hp, ap)
+                elif await self._final_confirmed(m["id"], r["home_score"], r["away_score"]):
                     res = await s.execute(
                         text("""
                             UPDATE matches
