@@ -46,14 +46,16 @@ class TestGroupStageParity:
 
 
 class TestKnockoutParity:
+    # Knockout rounds score the same as group rounds — the multiplier was
+    # removed from _score (is_ko is retained for signature stability only).
     def test_ko_exact(self):
-        assert s(2, 1, 2, 1, is_ko=True) == 9
+        assert s(2, 1, 2, 1, is_ko=True) == 5
 
     def test_ko_diff(self):
-        assert s(2, 1, 3, 2, is_ko=True) == 7
+        assert s(2, 1, 3, 2, is_ko=True) == 4
 
     def test_ko_tendency(self):
-        assert s(3, 0, 1, 0, is_ko=True) == 5
+        assert s(3, 0, 1, 0, is_ko=True) == 3
 
     def test_ko_wrong_not_multiplied(self):
         assert s(2, 0, 0, 1, is_ko=True) == 1
@@ -84,9 +86,9 @@ class TestFullTableParity:
         (2, 1, 3, 2, False): 4,   # diff
         (3, 0, 1, 0, False): 3,   # tendency
         (2, 0, 0, 1, False): 1,   # wrong → floor
-        (2, 1, 2, 1, True): 9,    # KO exact
-        (2, 1, 3, 2, True): 7,    # KO diff
-        (3, 0, 1, 0, True): 5,    # KO tendency
+        (2, 1, 2, 1, True): 5,    # KO exact (no multiplier — KO == group)
+        (2, 1, 3, 2, True): 4,    # KO diff
+        (3, 0, 1, 0, True): 3,    # KO tendency
         (2, 0, 0, 1, True): 1,    # KO wrong → floor
     }
 

@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 import json
+import structlog
 from redis.asyncio import Redis
 
 from app.db.session import get_db
@@ -43,6 +44,8 @@ from app.core.config import settings
 from app.core.discord import discord_client
 from app.api.deps import get_current_user, check_is_admin
 from app.core.limiter import limiter
+
+logger = structlog.get_logger()
 
 router = APIRouter()
 

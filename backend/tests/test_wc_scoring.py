@@ -57,27 +57,24 @@ class TestScorePredictionGroupStage:
 
 
 class TestScorePredictionKnockout:
-    """Knockout doubles the *correctness* part only; the floor stays at 1."""
+    """Knockout rounds score the same as group rounds — the multiplier was
+    removed; ko_mult/is_knockout are retained for signature stability only."""
 
     def test_ko_exact(self):
-        # 1 + round(4 * 2.0) = 1 + 8 = 9
-        assert score_prediction(2, 1, 2, 1, is_knockout=True) == 9
+        assert score_prediction(2, 1, 2, 1, is_knockout=True) == 5
 
     def test_ko_diff(self):
-        # 1 + round(3 * 2.0) = 1 + 6 = 7
-        assert score_prediction(2, 1, 3, 2, is_knockout=True) == 7
+        assert score_prediction(2, 1, 3, 2, is_knockout=True) == 4
 
     def test_ko_tendency(self):
-        # 1 + round(2 * 2.0) = 1 + 4 = 5
-        assert score_prediction(3, 0, 1, 0, is_knockout=True) == 5
+        assert score_prediction(3, 0, 1, 0, is_knockout=True) == 3
 
-    def test_ko_wrong_is_not_multiplied(self):
-        # base 0 → multiplier does not apply → floor only
+    def test_ko_wrong_scores_floor(self):
         assert score_prediction(2, 0, 0, 1, is_knockout=True) == 1
 
-    def test_custom_multiplier_rounds(self):
-        # base=3 (diff), ko_mult=1.5 → 1 + round(4.5) = 1 + 4 = 5 (banker's? round(4.5)=4)
-        assert score_prediction(2, 1, 3, 2, ko_mult=1.5, is_knockout=True) == 5
+    def test_custom_multiplier_ignored(self):
+        # ko_mult no longer affects the score: diff → 1 + 3 = 4
+        assert score_prediction(2, 1, 3, 2, ko_mult=1.5, is_knockout=True) == 4
 
 
 class TestScorePredictionNoneGuards:
